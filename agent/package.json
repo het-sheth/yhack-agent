@@ -10,13 +10,14 @@
     "start:outbound": "tsx outbound.ts"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "dotenv": "^16.4.7",
     "nats": "^2.29.1",
     "nodemailer": "^6.10.1"
   },
   "devDependencies": {
     "@types/node": "^22.13.14",
-    "@types/nodemailer": "^6.4.17",
+    "@types/nodemailer": "^6.4.23",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }

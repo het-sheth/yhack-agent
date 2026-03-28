@@ -1,5 +1,7 @@
 import "dotenv/config";
 import { readdirSync, readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { join, dirname } from "path";
 import { createTransport } from "nodemailer";
 
 interface SeedEmail {
@@ -16,17 +18,25 @@ function env(key: string): string {
 }
 
 function loadSeedEmails(): SeedEmail[] {
-  const dir = new URL("./seed-emails/", import.meta.url).pathname;
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "seed-emails");
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .sort();
-  return files.map((f) => JSON.parse(readFileSync(`${dir}${f}`, "utf-8")));
+  return files.map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")));
+}
+
+function parseCount(): number {
+  const idx = process.argv.indexOf("--count");
+  if (idx === -1) return Infinity;
+  const val = process.argv[idx + 1];
+  if (!val) throw new Error("Missing value for --count. Usage: npm run seed -- --count 10");
+  const n = parseInt(val, 10);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`Invalid --count value: ${val}`);
+  return n;
 }
 
 async function main() {
-  const countArg = process.argv.indexOf("--count");
-  const limit = countArg !== -1 ? parseInt(process.argv[countArg + 1], 10) : Infinity;
-
+  const limit = parseCount();
   const emails = loadSeedEmails();
   const toSend = emails.slice(0, limit);
 
@@ -55,7 +65,6 @@ async function main() {
 
     console.log(`[seed] Sent ${i + 1}/${toSend.length}: ${email.subject}`);
 
-    // 1-second delay to avoid rate limiting
     if (i < toSend.length - 1) {
       await new Promise((r) => setTimeout(r, 1000));
     }

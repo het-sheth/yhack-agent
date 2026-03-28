@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { randomUUID } from "crypto";
 import { readdirSync, readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { join, dirname } from "path";
 import { connect, JSONCodec } from "nats";
 import { SUBJECTS, NATS_URL } from "../shared/nats.js";
 import type { InboundMessage } from "../shared/types.js";
@@ -15,17 +17,25 @@ interface SeedEmail {
 }
 
 function loadSeedEmails(): SeedEmail[] {
-  const dir = new URL("./seed-emails/", import.meta.url).pathname;
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "seed-emails");
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .sort();
-  return files.map((f) => JSON.parse(readFileSync(`${dir}${f}`, "utf-8")));
+  return files.map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")));
+}
+
+function parseCount(): number {
+  const idx = process.argv.indexOf("--count");
+  if (idx === -1) return Infinity;
+  const val = process.argv[idx + 1];
+  if (!val) throw new Error("Missing value for --count. Usage: npm run inject -- --count 10");
+  const n = parseInt(val, 10);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`Invalid --count value: ${val}`);
+  return n;
 }
 
 async function main() {
-  const countArg = process.argv.indexOf("--count");
-  const limit = countArg !== -1 ? parseInt(process.argv[countArg + 1], 10) : Infinity;
-
+  const limit = parseCount();
   const emails = loadSeedEmails();
   const toInject = emails.slice(0, limit);
 

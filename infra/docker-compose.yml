@@ -1,0 +1,15 @@
+services:
+  nats:
+    image: nats:latest
+    command: ["--config", "/etc/nats/nats.conf"]
+    ports:
+      - "4222:4222"   # NATS client
+      - "8080:8080"   # WebSocket (leaf node)
+      - "7422:7422"   # Leaf node direct
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data/nats/jetstream
+    restart: unless-stopped
+
+volumes:
+  nats-data:

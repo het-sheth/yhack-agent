@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd bridge && npm install"
+
+[deploy]
+startCommand = "cd bridge && npm start"
+healthcheckPath = "/health"
+restartPolicyType = "on_failure"

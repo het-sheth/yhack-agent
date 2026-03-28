@@ -9,6 +9,8 @@ import { sign } from "./signer.js";
 const inboundCodec = JSONCodec<InboundMessage>();
 const rankedCodec = JSONCodec<RankedMessage>();
 
+const VALID_CATEGORIES = new Set(["urgent", "action-required", "fyi", "low-priority"]);
+
 function env(key: string): string {
   const v = process.env[key];
   if (!v) throw new Error(`Missing env var: ${key}`);
@@ -18,17 +20,25 @@ function env(key: string): string {
 function buildPrompt(msg: InboundMessage): string {
   return `You are an email triage assistant for a busy insurance broker. Categorize this message and draft a reply.
 
+<message>
 From: ${msg.from}
 Subject: ${msg.subject ?? "(no subject)"}
 Body: ${msg.body}
+</message>
 
-Respond with ONLY valid JSON (no markdown fences, no extra text):
+Respond with ONLY valid JSON (no markdown fences, no extra text). Use this exact JSON shape:
 {
-  "category": "urgent" | "action-required" | "fyi" | "low-priority",
-  "score": <number 1-10, 10 = most urgent>,
-  "gist": "<1-2 sentence summary>",
-  "draftReply": "<suggested response if action needed, empty string if fyi/low-priority>"
-}`;
+  "category": "urgent",
+  "score": 7,
+  "gist": "Short 1-2 sentence summary of the email.",
+  "draftReply": "Suggested response if action is needed, or an empty string if FYI or low-priority."
+}
+
+Allowed values:
+- "category" must be one of: "urgent", "action-required", "fyi", "low-priority".
+- "score" must be an integer from 1 to 10 (10 = most urgent).
+- "gist" must be a concise 1-2 sentence summary.
+- "draftReply" must be a suggested response if action is needed; use "" for FYI or low-priority.`;
 }
 
 function parseResponse(text: string): {
@@ -37,9 +47,35 @@ function parseResponse(text: string): {
   gist: string;
   draftReply: string;
 } {
-  // Strip markdown code fences if present
-  const cleaned = text.replace(/```json?\s*/gi, "").replace(/```\s*/g, "").trim();
-  return JSON.parse(cleaned);
+  let cleaned = text.trim();
+
+  // Remove leading/trailing markdown code fences only
+  cleaned = cleaned.replace(/^```[a-z]*\s*\n?/i, "");
+  cleaned = cleaned.replace(/```$/i, "").trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // Fallback: extract first JSON object from text
+    const first = cleaned.indexOf("{");
+    const last = cleaned.lastIndexOf("}");
+    if (first !== -1 && last > first) {
+      parsed = JSON.parse(cleaned.slice(first, last + 1));
+    } else {
+      throw new Error(`No valid JSON found in LLM response: ${cleaned.slice(0, 200)}`);
+    }
+  }
+
+  // Validate
+  if (!VALID_CATEGORIES.has(parsed.category)) {
+    parsed.category = "fyi";
+  }
+  parsed.score = Math.max(1, Math.min(10, Math.round(Number(parsed.score) || 5)));
+  parsed.gist = String(parsed.gist ?? "");
+  parsed.draftReply = String(parsed.draftReply ?? "");
+
+  return parsed;
 }
 
 async function main() {
@@ -63,23 +99,21 @@ async function main() {
       const parsed = parseResponse(text);
 
       const id = randomUUID();
-      const signature = sign(JSON.stringify({
-        id,
-        category: parsed.category,
-        score: parsed.score,
-        gist: parsed.gist,
-      }));
+      const rankedAt = new Date().toISOString();
 
-      const ranked: RankedMessage = {
+      // Sign the full payload (excluding signature itself)
+      const unsigned = {
         id,
         inbound,
         category: parsed.category,
         score: parsed.score,
         gist: parsed.gist,
         draftReply: parsed.draftReply,
-        signature,
-        rankedAt: new Date().toISOString(),
+        rankedAt,
       };
+      const signature = sign(JSON.stringify(unsigned));
+
+      const ranked: RankedMessage = { ...unsigned, signature };
 
       nc.publish(SUBJECTS.RANKED, rankedCodec.encode(ranked));
       console.log(

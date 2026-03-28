@@ -1,0 +1,22 @@
+{
+  "name": "yhack-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bridge": "npx tsx bridge/whatsapp.ts",
+    "agent": "npx tsx agent/categorizer.ts",
+    "adapters:email": "npx tsx adapters/email.ts",
+    "adapters:slack": "npx tsx adapters/slack.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.0.1",
+    "nats": "^2.28.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

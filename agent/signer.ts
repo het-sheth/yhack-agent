@@ -8,16 +8,24 @@ function getKeyPair(): { privateKey: KeyObject; publicKey: KeyObject } {
 
   const pem = process.env.ED25519_PRIVATE_KEY;
   if (pem) {
-    privateKey = createPrivateKey(pem);
+    // Normalize escaped newlines from .env single-line format
+    const normalizedPem = pem.replace(/\\n/g, "\n");
+    privateKey = createPrivateKey(normalizedPem);
     publicKey = createPublicKey(privateKey);
+  } else if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "[signer] ED25519_PRIVATE_KEY is not set. Refusing to generate ephemeral key in production."
+    );
   } else {
     const pair = generateKeyPairSync("ed25519");
     privateKey = pair.privateKey;
     publicKey = pair.publicKey;
+    const pubPem = publicKey.export({ type: "spki", format: "pem" });
     console.warn(
       "[signer] No ED25519_PRIVATE_KEY in env — generated ephemeral key pair.",
-      "Add this to .env for persistence:\n",
-      privateKey.export({ type: "pkcs8", format: "pem" })
+      "Set ED25519_PRIVATE_KEY for persistence.",
+      "Ephemeral public key:\n",
+      pubPem
     );
   }
 

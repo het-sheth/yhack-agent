@@ -1,0 +1,6 @@
+{
+  "from": "duffie@stanford.edu",
+  "subject": "Enron Storage Analysis Model audit",
+  "body": "Professor Darrel Duffie,\n\nI enclosed with this e-mail Enron Storage Analysis Model (SAM) for your review. The attached files include: 1) a brief documentation of the model (SAM.doc), 2) c-code of the main routines, 3) Excel spreadsheet interface, 4) SAM_audit.dll.",
+  "category_hint": "fyi"
+}

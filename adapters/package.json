@@ -1,0 +1,22 @@
+{
+  "name": "yhack-adapters",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:email": "tsx watch email.ts",
+    "start:email": "tsx email.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.2",
+    "nats": "^2.29.1"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.5",
+    "@types/node": "^22.13.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

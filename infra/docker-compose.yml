@@ -1,10 +1,10 @@
 services:
   nats:
-    image: nats:latest
+    image: nats:2.10.20
     command: ["--config", "/etc/nats/nats.conf"]
     ports:
       - "4222:4222"   # NATS client
-      - "8080:8080"   # WebSocket (leaf node)
+      - "8080:8080"   # NATS WebSocket client
       - "7422:7422"   # Leaf node direct
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro

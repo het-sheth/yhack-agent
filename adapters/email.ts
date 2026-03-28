@@ -2,11 +2,11 @@ import "dotenv/config";
 import { randomUUID } from "crypto";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
-import { connect, StringCodec, type NatsConnection } from "nats";
+import { connect, JSONCodec, type NatsConnection } from "nats";
 import { SUBJECTS, NATS_URL } from "../shared/nats.js";
 import type { InboundMessage } from "../shared/types.js";
 
-const sc = StringCodec();
+const jc = JSONCodec<InboundMessage>();
 const seenUids = new Set<number>();
 
 function env(key: string): string {
@@ -67,7 +67,7 @@ async function fetchAndPublish(
       receivedAt: (parsed.date ?? new Date()).toISOString(),
     };
 
-    nc.publish(SUBJECTS.INBOUND_EMAIL, sc.encode(JSON.stringify(msg)));
+    nc.publish(SUBJECTS.INBOUND_EMAIL, jc.encode(msg));
     console.log(`[email] Published: ${from} — ${subject ?? "(no subject)"}`);
   } catch (err) {
     console.error(`[email] Failed to process UID ${uid}:`, err);

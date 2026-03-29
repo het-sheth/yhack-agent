@@ -82,9 +82,9 @@ async function main() {
           continue;
         }
         const threadId = rankedMsg.inbound.threadId;
-        // Reply to the Slack user/channel, optionally in the original thread
+        // Reply to the Slack conversation, optionally in the original thread
         await slack.chat.postMessage({
-          channel: recipient, // Slack user ID from replyTo field
+          channel: recipient, // Slack channel/conversation ID from replyTo field
           text: approved.finalReply,
           ...(threadId ? { thread_ts: threadId } : {}),
         });

@@ -41,9 +41,8 @@ const API_SECRET = process.env.API_SECRET;
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!API_SECRET) { next(); return; } // no secret configured = dev mode, skip auth
   const authHeader = req.headers.authorization;
-  // Also accept ?token= query param for SSE (EventSource can't set headers)
-  const queryToken = req.query.token as string | undefined;
-  if (queryToken === API_SECRET) { next(); return; }
+  // Accept ?token= only for SSE endpoint (EventSource can't set headers)
+  if (req.path === "/api/events" && req.query.token === API_SECRET) { next(); return; }
   if (!authHeader) { res.status(401).json({ error: "Unauthorized" }); return; }
   const [scheme, ...rest] = authHeader.trim().split(/\s+/);
   if (!scheme || scheme.toLowerCase() !== "bearer") { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -52,10 +51,9 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   res.status(401).json({ error: "Unauthorized" });
 }
 
-// Capture raw body for webhook signature verification
-let rawBodyBuffer: Buffer | null = null;
+// Capture raw body per-request for webhook signature verification
 app.use(express.json({
-  verify: (_req, _res, buf) => { rawBodyBuffer = buf; },
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -72,6 +70,14 @@ const META_APP_SECRET = process.env.META_APP_SECRET;
 const jc = JSONCodec();
 let nc: NatsConnection;
 
+// Build inbox context string with replied status
+function buildInboxContext(messages: any[]): string {
+  return messages.map((m: any, i: number) => {
+    const status = m.repliedAt ? "REPLIED" : m.category.toUpperCase();
+    return `[${i+1}] ${status} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}${m.repliedAt ? " [already replied]" : ""}`;
+  }).join("\n") || "Inbox is empty.";
+}
+
 // Conversation history per user (last 10 messages for context)
 const conversations = new Map<string, { role: string; content: string }[]>();
 
@@ -83,7 +89,7 @@ function verifyWebhookSignature(req: express.Request): boolean {
   if (!META_APP_SECRET) return true; // skip in dev if not configured
   const sig = req.headers["x-hub-signature-256"] as string;
   if (!sig) return false;
-  const body = rawBodyBuffer || Buffer.from(JSON.stringify(req.body));
+  const body = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
   const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
     .update(body).digest("hex");
   try {
@@ -123,10 +129,8 @@ app.get("/api/gemini-key", requireAuth, (_req, res) => {
 app.get("/api/eleven-session", requireAuth, async (_req, res) => {
   try {
     const col = await rankedCol();
-    const messages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
-    const inboxContext = messages.map((m, i) =>
-      `[${i+1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
-    ).join("\n") || "Inbox is empty.";
+    const messages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const inboxContext = buildInboxContext(messages);
 
     // Get signed URL from ElevenLabs
     const signRes = await fetch(`https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`, {
@@ -214,9 +218,10 @@ async function converse(from: string, userText: string, isVoice: boolean) {
   const col = await rankedCol();
   const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
 
-  const inboxContext = recentMessages.map((m, i) =>
-    `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}${m.draftReply ? ` | Draft reply: "${m.draftReply.slice(0, 100)}"` : ""} | ID: ${m.id}`
-  ).join("\n");
+  const inboxContext = recentMessages.map((m: any, i: number) => {
+    const status = m.repliedAt ? "REPLIED" : m.category.toUpperCase();
+    return `[${i + 1}] ${status} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}${m.repliedAt ? " [already replied]" : ""}${m.draftReply && !m.repliedAt ? ` | Draft reply: "${m.draftReply.slice(0, 100)}"` : ""} | ID: ${m.id}`;
+  }).join("\n");
 
   const pending = pendingActions.get(from);
   const pendingContext = pending
@@ -564,6 +569,10 @@ app.post("/api/approve", requireAuth, apiLimiter, express.json(), async (req, re
     nc.publish(SUBJECTS.APPROVED, jc.encode(approved));
     broadcastSSE("approved", approved);
 
+    // Mark as replied in MongoDB so it doesn't keep showing up
+    const col = await rankedCol();
+    await col.updateOne({ id: messageId }, { $set: { repliedAt: new Date().toISOString(), repliedWith: finalDraft } }).catch(() => {});
+
     console.log(`[bridge] Web approve: sent reply for ${ranked.inbound.from}`);
     res.json({ ok: true, to: ranked.inbound.from, channel: ranked.inbound.channel });
   } catch (err) {
@@ -591,10 +600,8 @@ app.post("/api/voice-text", requireAuth, apiLimiter, express.json(), async (req,
     if (!text) { res.json({ reply: "Didn't catch that.", audioBase64: null }); return; }
 
     const col = await rankedCol();
-    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
-    const inboxContext = recentMessages.map((m, i) =>
-      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
-    ).join("\n");
+    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const inboxContext = buildInboxContext(recentMessages);
 
     const webHistory = conversations.get("web") ?? [];
     webHistory.push({ role: "user", content: text });
@@ -607,7 +614,7 @@ app.post("/api/voice-text", requireAuth, apiLimiter, express.json(), async (req,
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [
-          { role: "system", content: `You are an AI inbox assistant. Be natural, casual, brief — like talking to a friend who manages your email.\n\nINBOX:\n${inboxContext || "Empty."}` },
+          { role: "system", content: `You are an AI inbox assistant. Be natural, casual, brief — like talking to a friend who manages your email. Messages marked REPLIED have already been answered — don't suggest replying to them again.\n\nINBOX:\n${inboxContext || "Empty."}` },
           ...webHistory.slice(-10),
         ],
         temperature: 0.5,
@@ -683,10 +690,8 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
 
     // Converse using the same engine (reuse converse logic inline)
     const col = await rankedCol();
-    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
-    const inboxContext = recentMessages.map((m, i) =>
-      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
-    ).join("\n");
+    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const inboxContext = buildInboxContext(recentMessages);
 
     const webHistory = conversations.get("web") ?? [];
     webHistory.push({ role: "user", content: transcript });

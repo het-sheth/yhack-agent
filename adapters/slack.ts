@@ -71,7 +71,7 @@ async function main() {
         id: randomUUID(),
         channel: "slack",
         from: user,
-        replyTo: channel !== "unknown" ? channel : userId, // Slack channel ID for thread replies, falls back to user ID for DMs
+        replyTo: channel !== "unknown" ? channel : userId, // Slack channel/conversation ID for both channels and DMs; falls back to user ID only if unknown
         body: text,
         threadId: threadTs ?? ts,
         threadDepth: threadTs ? 1 : 0,

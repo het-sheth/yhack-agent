@@ -2,7 +2,7 @@ export interface InboundMessage {
   id: string;
   channel: "email" | "slack" | "whatsapp";
   from: string;
-  replyTo?: string; // raw address for outbound (e.g. Slack user ID, email address)
+  replyTo?: string; // outbound address (email address, or Slack channel/conversation ID for chat.postMessage)
   subject?: string;
   body: string;
   attachments?: string[];

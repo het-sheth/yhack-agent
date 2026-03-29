@@ -201,6 +201,7 @@ let elevenWs = null;
 let elevenStream = null;
 let elevenProcessor = null;
 let elevenNextPlay = 0;
+let elevenSources = []; // track scheduled audio sources for interruption
 
 async function orbClickEleven() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -222,19 +223,12 @@ async function orbClickEleven() {
     elevenWs.onopen = () => {
       console.log('ElevenLabs connected');
 
-      // Send conversation initiation with inbox context and overrides
+      // Send conversation initiation — pass inbox context via dynamic variables
+      // (prompt override is blocked by agent config, so we rely on {{inbox_context}} in the agent's system prompt)
       elevenWs.send(JSON.stringify({
         type: "conversation_initiation_client_data",
-        conversation_config_override: {
-          agent: {
-            prompt: {
-              prompt: "You are Sarah, an inbox assistant. Warm, casual, never say you're AI. CRITICAL RULES: Max 2 sentences per turn. FINISH every sentence. Never use 'Also' at the end. If listing emails, say at most 3 per turn — user can ask for more.\n\nUser is an insurance broker. Inbox:\n" + session.inboxContext
-            },
-            first_message: "Hey! You've got some new messages. Want me to run through them?"
-          },
-          tts: {
-            optimize_streaming_latency: 3
-          }
+        dynamic_variables: {
+          inbox_context: session.inboxContext || "Inbox is empty."
         }
       }));
     };
@@ -254,10 +248,13 @@ async function orbClickEleven() {
         playElevenChunk(msg.audio?.chunk || msg.audio_event?.audio_base_64);
       }
 
-      // Agent text transcript
+      // Agent text transcript — detect send intent
       if (msg.type === 'agent_response') {
         const text = msg.agent_response_event?.agent_response;
-        if (text) addBubble(text, false);
+        if (text) {
+          addBubble(text, false);
+          if (/sending it now/i.test(text)) triggerSendFromVoice(text);
+        }
       }
 
       // User transcript
@@ -271,9 +268,9 @@ async function orbClickEleven() {
         setOrb('listening');
       }
 
-      // Interruption detected
+      // Interruption detected — immediately stop all scheduled audio
       if (msg.type === 'interruption') {
-        elevenNextPlay = 0; // clear audio queue
+        clearElevenAudio();
         setOrb('listening');
       }
     };
@@ -282,11 +279,16 @@ async function orbClickEleven() {
       console.error('ElevenLabs error:', e);
       document.getElementById('vstat').textContent = 'Connection error';
       stopEleven();
+      active = false;
+      setOrb('idle');
     };
 
-    elevenWs.onclose = () => {
-      console.log('ElevenLabs disconnected');
-      if (active) stopEleven();
+    elevenWs.onclose = (e) => {
+      console.log('ElevenLabs disconnected:', e.code, e.reason);
+      stopEleven();
+      active = false;
+      setOrb('idle');
+      document.getElementById('vstat').textContent = 'Disconnected' + (e.reason ? ': ' + e.reason : '') + ' — tap to reconnect';
     };
 
   } catch(e) {
@@ -363,13 +365,25 @@ function playElevenChunk(b64) {
   const startAt = Math.max(now, elevenNextPlay);
   source.start(startAt);
   elevenNextPlay = startAt + buffer.duration;
+
+  // Track for interruption
+  elevenSources.push(source);
+  source.onended = () => {
+    elevenSources = elevenSources.filter(s => s !== source);
+  };
+}
+
+function clearElevenAudio() {
+  elevenSources.forEach(s => { try { s.stop(); } catch {} });
+  elevenSources = [];
+  elevenNextPlay = 0;
 }
 
 function stopEleven() {
   try { if (elevenWs) { elevenWs.close(); elevenWs = null; } } catch {}
   try { if (elevenStream) { elevenStream.getTracks().forEach(t => t.stop()); elevenStream = null; } } catch {}
   try { if (elevenProcessor) { elevenProcessor.disconnect(); elevenProcessor = null; } } catch {}
-  elevenNextPlay = 0;
+  clearElevenAudio();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -652,6 +666,40 @@ function finishGroq() {
   setOrb('thinking');
   recorder.stop();
   recorder.stream.getTracks().forEach(t => t.stop());
+}
+
+// ── Voice send trigger: detect "Sending it now" from agent ──
+async function triggerSendFromVoice(agentText) {
+  try {
+    // Find the most relevant message by matching recipient name from agent's response
+    const res = await fetch('/api/messages?limit=15');
+    const messages = await res.json();
+    if (!messages.length) return;
+
+    // Try to match a name from the agent's text to a message sender
+    let target = messages[0]; // default to most urgent/recent
+    for (const m of messages) {
+      const from = (m.inbound?.from || '').toLowerCase();
+      const name = from.split('@')[0].replace(/[._]/g, ' ');
+      if (agentText.toLowerCase().includes(name) || agentText.toLowerCase().includes(from)) {
+        target = m;
+        break;
+      }
+    }
+
+    const approveRes = await fetch('/api/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageId: target.id, draft: target.draftReply }),
+    });
+    const result = await approveRes.json();
+    if (result.ok) {
+      console.log('Voice send triggered:', result.to);
+      addBubble(`✅ Reply sent to ${result.to} via ${result.channel}`, false);
+    }
+  } catch (e) {
+    console.error('Voice send error:', e);
+  }
 }
 
 // ── Text input for Voice tab ──

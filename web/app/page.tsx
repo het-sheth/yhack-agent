@@ -246,7 +246,7 @@ export default function Home() {
   }
 
   // Regex for detecting agent send confirmations — single source of truth
-  const SEND_CONFIRM_RE = /sending it now|i['']ve sent|sent the (response|reply|message)/i;
+  const SEND_CONFIRM_RE = /sending it now|i.?ve sent|sent the (response|reply|message)/i;
 
   // Extract the draft from the conversation — look backwards for the last agent message
   // that contains a quoted draft (before send confirmation)

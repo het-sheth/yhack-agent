@@ -16,12 +16,18 @@ export async function getDb(): Promise<Db> {
   await db.collection("ranked").createIndex(
     { "inbound.from": "text", "inbound.subject": "text", gist: "text", "inbound.body": "text" },
     { background: true }
-  ).catch(() => {}); // ignore if already exists
+  ).catch((err) => {
+    console.warn("[db] Failed to create text search index:", err.message);
+  });
 
-  await db.collection("ranked").createIndex({ "inbound.id": 1 }, { unique: true, background: true }).catch(() => {});
-  await db.collection("ranked").createIndex({ rankedAt: -1 }, { background: true }).catch(() => {});
+  await db.collection("ranked").createIndex({ "inbound.id": 1 }, { unique: true, background: true }).catch((err) => {
+    console.error("[db] Failed to create unique index on ranked.inbound.id:", err.message);
+  });
+  await db.collection("ranked").createIndex({ rankedAt: -1 }, { background: true }).catch((err) => {
+    console.warn("[db] Failed to create rankedAt index:", err.message);
+  });
 
-  console.log(`[db] Connected to MongoDB: ${MONGODB_URI}`);
+  console.log(`[db] Connected to MongoDB: ${MONGODB_URI.replace(/\/\/[^@]+@/, "//***@")}`);
   return db;
 }
 

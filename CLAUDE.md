@@ -106,8 +106,12 @@ demo/      ← Seed data, pitch notes
   ED25519_PRIVATE_KEY=
   ELEVENLABS_API_KEY=
   ELEVENLABS_VOICE_ID=
+  ELEVENLABS_AGENT_ID=
   MONGODB_URI=
   RECIPIENT_PHONE=
+  API_SECRET=
+  META_APP_SECRET=
+  CORS_ORIGIN=
   ```
 - **Ed25519 signing:** Use Node.js `crypto.sign` with Ed25519. Key pair generated once, stored in `.env`.
 - **Error handling:** Log and continue. Never crash the process on a single message failure.

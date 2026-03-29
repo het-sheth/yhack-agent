@@ -461,6 +461,36 @@ function broadcastSSE(event: string, data: unknown) {
   }
 }
 
+// REST: approve and send a reply (used by web voice client)
+app.post("/api/approve", express.json(), async (req, res) => {
+  try {
+    const { messageId, draft } = req.body;
+    if (!messageId) { res.status(400).json({ error: "messageId required" }); return; }
+
+    const ranked = await findRanked(messageId);
+    if (!ranked) { res.status(404).json({ error: "Message not found" }); return; }
+
+    const finalDraft = draft || ranked.draftReply;
+    const id = crypto.randomUUID();
+    const approved: ApprovedMessage = {
+      id,
+      rankedMessageId: ranked.id,
+      finalReply: finalDraft,
+      approvedVia: "voice",
+      approvedAt: new Date().toISOString(),
+      signature: sign(JSON.stringify({ id, rankedMessageId: ranked.id })),
+    };
+    nc.publish(SUBJECTS.APPROVED, jc.encode(approved));
+    broadcastSSE("approved", approved);
+
+    console.log(`[bridge] Web approve: sent reply for ${ranked.inbound.from}`);
+    res.json({ ok: true, to: ranked.inbound.from, channel: ranked.inbound.channel });
+  } catch (err) {
+    console.error("[bridge] approve error:", err);
+    res.status(500).json({ error: "Failed to approve" });
+  }
+});
+
 // REST: paginated message history from MongoDB
 app.get("/api/messages", async (req, res) => {
   try {

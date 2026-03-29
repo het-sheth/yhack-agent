@@ -39,8 +39,9 @@ async function main() {
   // Listen to all messages in channels the bot is in
   app.message(async ({ message, client }) => {
     try {
-      // Skip bot messages and subtypes (edits, deletes, etc.)
+      // Skip bot messages, subtypes (edits, deletes), and our own messages
       if (message.subtype) return;
+      if ("bot_id" in message && message.bot_id) return;
 
       const userId = "user" in message ? (message.user as string) : "unknown";
       const text = "text" in message ? (message.text as string) : "";

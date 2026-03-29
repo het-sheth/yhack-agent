@@ -52,9 +52,9 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
 }
 
 // Capture raw body per-request for webhook signature verification
-import "../shared/express.js";
+/// <reference path="../shared/express.d.ts" />
 app.use(express.json({
-  verify: (req, _res, buf) => { req.rawBody = buf; },
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -90,7 +90,7 @@ function verifyWebhookSignature(req: express.Request): boolean {
   if (!META_APP_SECRET) return true; // skip in dev if not configured
   const sig = req.headers["x-hub-signature-256"] as string;
   if (!sig) return false;
-  const body = req.rawBody || Buffer.from(JSON.stringify(req.body));
+  const body = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
   const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
     .update(body).digest("hex");
   try {
@@ -748,9 +748,16 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
 
 // ── Start ─────────────────────────────────────────────────────────────────
 async function main() {
-  await getDb();
+  const db = await getDb();
   nc = await connect({ servers: NATS_URL });
   console.log("[bridge] NATS connected");
+
+  // One-time migration: patch Slack messages missing replyTo
+  const patched = await db.collection("ranked").updateMany(
+    { "inbound.channel": "slack", "inbound.replyTo": { $exists: false } },
+    [{ $set: { "inbound.replyTo": { $ifNull: ["$inbound.replyTo", "unknown"] } } }]
+  );
+  if (patched.modifiedCount > 0) console.log(`[bridge] Patched ${patched.modifiedCount} Slack messages missing replyTo`);
 
   // Subscribe to NATS for SSE broadcasting
   const allSub = nc.subscribe("messages.>");

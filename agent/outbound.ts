@@ -81,14 +81,48 @@ async function main() {
           console.warn("[outbound] No SLACK_BOT_TOKEN — cannot send Slack reply");
           continue;
         }
+
+        // Determine the Slack channel/conversation to post to
+        // replyTo should be a Slack channel ID (C...) or DM ID (D...) — prefer it
+        // Fall back: if replyTo looks like a display name (not C/D/U prefix), try to find the channel
+        let slackChannel = rankedMsg.inbound.replyTo;
+        if (!slackChannel || !/^[CDU][A-Z0-9]+$/.test(slackChannel)) {
+          // replyTo is missing or is a display name — try threadId's channel or skip
+          console.warn(`[outbound] Slack replyTo is invalid: "${slackChannel}" for message ${rankedMsg.id}`);
+          // Last resort: try opening a DM with the from field if it looks like a user ID
+          if (rankedMsg.inbound.from && /^U[A-Z0-9]+$/.test(rankedMsg.inbound.from)) {
+            slackChannel = rankedMsg.inbound.from;
+          } else {
+            console.error(`[outbound] Cannot determine Slack channel — skipping`);
+            continue;
+          }
+        }
+
         const threadId = rankedMsg.inbound.threadId;
-        // Reply to the Slack conversation, optionally in the original thread
-        await slack.chat.postMessage({
-          channel: recipient, // Slack channel/conversation ID from replyTo field
-          text: approved.finalReply,
-          ...(threadId ? { thread_ts: threadId } : {}),
-        });
-        console.log(`[outbound] Sent Slack reply to ${recipient}${threadId ? ` (thread: ${threadId})` : ""}`);
+        try {
+          await slack.chat.postMessage({
+            channel: slackChannel,
+            text: approved.finalReply,
+            ...(threadId ? { thread_ts: threadId } : {}),
+          });
+          console.log(`[outbound] Sent Slack reply to ${slackChannel}${threadId ? ` (thread: ${threadId})` : ""}`);
+        } catch (slackErr: any) {
+          // If channel_not_found with a user ID, try opening a DM conversation first
+          if (slackErr?.data?.error === "channel_not_found" && slackChannel.startsWith("U")) {
+            try {
+              const dm = await slack.conversations.open({ users: slackChannel });
+              if (dm.channel?.id) {
+                await slack.chat.postMessage({ channel: dm.channel.id, text: approved.finalReply });
+                console.log(`[outbound] Sent Slack DM to ${slackChannel} via ${dm.channel.id}`);
+              }
+            } catch (dmErr) {
+              console.error(`[outbound] Slack DM fallback failed:`, dmErr);
+              continue;
+            }
+          } else {
+            throw slackErr;
+          }
+        }
       } else {
         console.log(`[outbound] Channel "${channel}" not implemented — skipping`);
         continue;

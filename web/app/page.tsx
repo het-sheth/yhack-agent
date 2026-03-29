@@ -245,15 +245,18 @@ export default function Home() {
     source.onended = () => { sourcesRef.current = sourcesRef.current.filter((s) => s !== source); };
   }
 
+  // Regex for detecting agent send confirmations — single source of truth
+  const SEND_CONFIRM_RE = /sending it now|i['']ve sent|sent the (response|reply|message)/i;
+
   // Extract the draft from the conversation — look backwards for the last agent message
-  // that contains a quoted draft (before "Sending it now")
+  // that contains a quoted draft (before send confirmation)
   function extractDraftFromChat(): string | null {
     // Walk backwards through chat to find the agent's draft message
     for (let i = chatRef.current.length - 1; i >= 0; i--) {
       const msg = chatRef.current[i];
       if (msg.isUser) continue;
       // Skip the "Sending it now" message itself
-      if (/sending it now|i've sent|i.ve sent|sent the (response|reply|message)/i.test(msg.text)) continue;
+      if (SEND_CONFIRM_RE.test(msg.text)) continue;
       // The previous agent message is likely the draft
       // Extract text between quotes if present, otherwise use the whole message
       const quoted = msg.text.match(/"([^"]+)"/);
@@ -337,7 +340,7 @@ export default function Home() {
         const msg = JSON.parse(event.data);
         if (msg.type === "conversation_initiation_metadata") { startMic(ws); setOrbState("listening"); }
         if (msg.type === "audio") { setOrbState("speaking"); playChunk(msg.audio?.chunk || msg.audio_event?.audio_base_64); }
-        if (msg.type === "agent_response") { const text = msg.agent_response_event?.agent_response; if (text) { addChat({ text, isUser: false }); if (/sending it now|i've sent|i.ve sent|sent the (response|reply|message)/i.test(text)) triggerSend(text); } }
+        if (msg.type === "agent_response") { const text = msg.agent_response_event?.agent_response; if (text) { addChat({ text, isUser: false }); if (SEND_CONFIRM_RE.test(text)) triggerSend(text); } }
         if (msg.type === "user_transcript") { const text = msg.user_transcription_event?.user_transcript; if (text) addChat({ text, isUser: true }); }
         if (msg.type === "agent_response_correction" || msg.type === "turn_end") setOrbState("listening");
         if (msg.type === "interruption") { clearAudio(); setOrbState("listening"); }

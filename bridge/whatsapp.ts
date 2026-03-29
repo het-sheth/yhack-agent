@@ -1,8 +1,16 @@
 import "dotenv/config";
+import { execSync } from "child_process";
+import { writeFileSync, readFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import express from "express";
+import multer from "multer";
 import { connect, JSONCodec, type NatsConnection } from "nats";
 import { SUBJECTS, NATS_URL } from "../shared/nats.js";
 import type { RankedMessage, ApprovedMessage } from "../shared/types.js";
+import { sign } from "../agent/signer.js";
+import { getDb, rankedCol } from "../shared/db.js";
 
 const app = express();
 app.use(express.json());
@@ -11,249 +19,342 @@ const PORT = process.env.PORT || 3000;
 const WHATSAPP_TOKEN = process.env.META_WHATSAPP_TOKEN!;
 const PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID!;
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "yhack2026";
-const RECIPIENT_PHONE = process.env.RECIPIENT_PHONE!; // your phone number with country code
+const RECIPIENT_PHONE = process.env.RECIPIENT_PHONE!;
+const GROQ_KEY = process.env.GROQ_API_KEY!;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
 
 const jc = JSONCodec();
 let nc: NatsConnection;
 
-// store ranked messages by id so we can look them up when user taps buttons
-const rankedMessages = new Map<string, RankedMessage>();
+// Conversation history per user (last 10 messages for context)
+const conversations = new Map<string, { role: string; content: string }[]>();
 
-// ── Meta Webhook Verification ──────────────────────────────────────────────
+// Track pending actions (agent proposed something, waiting for confirmation)
+const pendingActions = new Map<string, { type: string; ranked: RankedMessage; draft: string }>();
+
+// ── Webhook ───────────────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("webhook verified");
+    console.log("[bridge] webhook verified");
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
   }
 });
 
-// ── Incoming WhatsApp Messages (button taps, voice notes, text) ────────────
-app.post("/webhook", async (req, res) => {
-  const body = req.body;
-  res.sendStatus(200); // always ack immediately
+app.get("/health", (_req, res) => res.send("ok"));
 
-  const entry = body?.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const value = changes?.value;
-  const message = value?.messages?.[0];
+// Serve Gemini API key for Live API WebSocket
+app.get("/api/gemini-key", (_req, res) => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) { res.status(500).json({ error: "No Gemini key" }); return; }
+  res.json({ key });
+});
 
-  if (!message) return;
+// ElevenLabs Conversational AI: get signed URL + inbox context
+app.get("/api/eleven-session", async (_req, res) => {
+  try {
+    const col = await rankedCol();
+    const messages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
+    const inboxContext = messages.map((m, i) =>
+      `[${i+1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
+    ).join("\n") || "Inbox is empty.";
 
-  const from = message.from; // sender phone number
+    // Get signed URL from ElevenLabs
+    const signRes = await fetch("https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=agent_1501kmvpbae7frc8crxb7h5ve0p6", {
+      headers: { "xi-api-key": ELEVENLABS_API_KEY! },
+    });
+    const signData = (await signRes.json()) as { signed_url?: string };
 
-  // handle interactive button replies
-  if (message.type === "interactive") {
-    const buttonId = message.interactive?.button_reply?.id;
-    const listId = message.interactive?.list_reply?.id;
-    const replyId = buttonId || listId;
-
-    if (!replyId) return;
-
-    // button ids are formatted as: action:messageId
-    const [action, messageId] = replyId.split(":");
-    const ranked = rankedMessages.get(messageId);
-
-    if (!ranked) {
-      await sendText(from, "Message not found. It may have expired.");
-      return;
-    }
-
-    switch (action) {
-      case "send":
-        await handleApprove(ranked, from);
-        break;
-      case "details":
-        await sendDetails(ranked, from);
-        break;
-      case "skip":
-        await sendText(from, `Skipped. I'll remind you in 1 hour.`);
-        break;
-      case "send2": // send from details view
-        await handleApprove(ranked, from);
-        break;
-      case "edit":
-        await sendText(from, `Reply with your edits for: "${ranked.gist}"`);
-        break;
-      case "full":
-        await sendFull(ranked, from);
-        break;
-    }
-    return;
-  }
-
-  // handle voice notes
-  if (message.type === "audio") {
-    const audioId = message.audio?.id;
-    if (audioId) {
-      await handleVoiceNote(audioId, from);
-    }
-    return;
-  }
-
-  // handle text messages (edits, "what's new?", etc.)
-  if (message.type === "text") {
-    const text = message.text?.body?.toLowerCase().trim();
-    if (text === "what's new?" || text === "whats new" || text === "status" || text === "digest") {
-      await sendDigest(from);
-    } else {
-      // treat as an edit command — publish to NATS for agent to handle
-      nc.publish(
-        SUBJECTS.INBOUND_WHATSAPP,
-        jc.encode({
-          id: crypto.randomUUID(),
-          channel: "whatsapp",
-          from,
-          body: message.text?.body,
-          receivedAt: new Date().toISOString(),
-        })
-      );
-    }
-    return;
+    res.json({ signedUrl: signData.signed_url, inboxContext });
+  } catch (err) {
+    console.error("[bridge] eleven-session error:", err);
+    res.status(500).json({ error: "Failed to create session" });
   }
 });
 
-// ── Send WhatsApp Interactive Button Message (Layer 1: Alert) ──────────────
-async function sendAlert(ranked: RankedMessage, to: string) {
-  const emoji =
-    ranked.category === "urgent" ? "🔴" :
-    ranked.category === "action-required" ? "🟡" : "🟢";
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+  const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  if (!message) return;
 
-  await sendInteractiveButtons(to, {
-    body: `${emoji} ${ranked.inbound.from}\n${ranked.inbound.subject || "(no subject)"}\n\n${ranked.gist}`,
-    buttons: [
-      { id: `send:${ranked.id}`, title: "✅ Send" },
-      { id: `details:${ranked.id}`, title: "📋 Details" },
-      { id: `skip:${ranked.id}`, title: "⏭ Skip" },
-    ],
-  });
-}
+  const from = message.from;
 
-// ── Send Details (Layer 2) ─────────────────────────────────────────────────
-async function sendDetails(ranked: RankedMessage, to: string) {
-  const lines = [
-    `From: ${ranked.inbound.from}`,
-    ranked.inbound.subject ? `Subject: ${ranked.inbound.subject}` : "",
-    `Via: ${ranked.inbound.channel} │ ${new Date(ranked.inbound.receivedAt).toLocaleTimeString()}` +
-      (ranked.inbound.threadDepth ? ` │ Thread: ${ranked.inbound.threadDepth}` : ""),
-    "",
-    `Gist: ${ranked.gist}`,
-    "",
-    `Draft: "${ranked.draftReply}"`,
-  ].filter(Boolean).join("\n");
+  try {
+    let userText = "";
+    let isVoice = false;
 
-  await sendInteractiveButtons(to, {
-    body: lines,
-    buttons: [
-      { id: `send2:${ranked.id}`, title: "✅ Send" },
-      { id: `edit:${ranked.id}`, title: "✏️ Edit" },
-      { id: `full:${ranked.id}`, title: "🔗 Full" },
-    ],
-  });
-}
+    if (message.type === "text") {
+      userText = message.text?.body?.trim() ?? "";
+    } else if (message.type === "audio") {
+      isVoice = true;
+      const transcript = await transcribeVoice(message.audio?.id);
+      if (!transcript) { await sendText(from, "Couldn't hear that. Try again?"); return; }
+      userText = transcript;
+      await sendText(from, `🎤 "${userText}"`);
+    } else if (message.type === "interactive") {
+      const replyId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id;
+      if (replyId) {
+        userText = `[BUTTON: ${replyId}]`;
+      }
+    }
 
-// ── Send Full Content (Layer 3) ────────────────────────────────────────────
-async function sendFull(ranked: RankedMessage, to: string) {
-  const body = ranked.inbound.body.length > 1500
-    ? ranked.inbound.body.slice(0, 1500) + "\n\n[truncated]"
-    : ranked.inbound.body;
+    if (!userText) return;
 
-  await sendText(to, body);
-}
+    await converse(from, userText, isVoice);
+  } catch (err) {
+    console.error("[bridge] error:", err);
+  }
+});
 
-// ── Send Digest ────────────────────────────────────────────────────────────
-async function sendDigest(to: string) {
-  const all = Array.from(rankedMessages.values());
-  const urgent = all.filter((m) => m.category === "urgent").length;
-  const action = all.filter((m) => m.category === "action-required").length;
-  const fyi = all.filter((m) => m.category === "fyi" || m.category === "low-priority").length;
+// ── The Conversation Engine ───────────────────────────────────────────────
+async function converse(from: string, userText: string, isVoice: boolean) {
+  console.log(`[bridge] ${from}: "${userText}"`);
 
-  const actionItems = all
-    .filter((m) => m.category === "urgent" || m.category === "action-required")
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 10);
+  // Handle button taps as actions
+  if (userText.startsWith("[BUTTON:")) {
+    const replyId = userText.replace("[BUTTON: ", "").replace("]", "");
+    const [action, messageId] = replyId.split(":");
 
-  if (actionItems.length === 0) {
-    await sendText(to, `📊 All clear. ${fyi} FYI messages, nothing needs action.`);
-    return;
+    if (action === "send" || action === "send2") {
+      const ranked = await findRanked(messageId);
+      if (!ranked) { await sendText(from, "Message expired."); return; }
+      const draft = pendingActions.get(from)?.draft ?? ranked.draftReply;
+      await handleApprove(ranked, draft, from);
+      addToHistory(from, "user", "send it");
+      addToHistory(from, "assistant", `Done. Sent reply to ${ranked.inbound.from}.`);
+      return;
+    }
+    if (action === "skip") {
+      await sendText(from, "Skipped.");
+      addToHistory(from, "user", "skip");
+      addToHistory(from, "assistant", "Skipped.");
+      return;
+    }
+    // For details/edit/full — convert to natural language and let the LLM handle it
+    if (action === "details") userText = "show me the details of that message";
+    if (action === "edit") userText = "I want to edit the draft reply";
+    if (action === "full") userText = "show me the full email";
   }
 
-  const listItems = actionItems.map((m, i) => ({
-    id: `details:${m.id}`,
-    title: `${i + 1}. ${m.inbound.from}`.slice(0, 24),
-    description: m.gist.slice(0, 72),
-  }));
+  // Build inbox context from MongoDB
+  const col = await rankedCol();
+  const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
 
-  await sendInteractiveList(to, {
-    body: `📊 ${urgent} urgent │ ${action} action needed │ ${fyi} FYI`,
-    buttonText: "View Items",
-    sections: [{ title: "Action Items", rows: listItems }],
-  });
+  const inboxContext = recentMessages.map((m, i) =>
+    `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}${m.draftReply ? ` | Draft reply: "${m.draftReply.slice(0, 100)}"` : ""} | ID: ${m.id}`
+  ).join("\n");
+
+  const pending = pendingActions.get(from);
+  const pendingContext = pending
+    ? `\n\nPENDING ACTION: You proposed sending a reply to ${pending.ranked.inbound.from}. Draft: "${pending.draft}". User hasn't confirmed yet.`
+    : "";
+
+  // Get or create conversation history
+  const history = conversations.get(from) ?? [];
+  addToHistory(from, "user", userText);
+
+  const systemPrompt = `You are an AI inbox assistant. You're chatting with the user on WhatsApp. Be natural, casual, and helpful — like a smart friend who manages their email.
+
+INBOX (${recentMessages.length} messages):
+${inboxContext || "Empty — no messages yet."}
+${pendingContext}
+
+RULES:
+- Be conversational. Short responses. This is WhatsApp, not a formal email.
+- When the user asks about their inbox, summarize naturally — don't dump a list.
+- When the user asks about a specific person or topic, find it and give the gist.
+- When the user wants to reply, show the draft and ask for confirmation.
+- When the user wants to edit a draft, revise it based on their instructions and show the new version.
+- When the user confirms "send it" / "yes" / "go ahead", include EXACTLY this tag: [SEND:message_id] with the message ID from the inbox.
+- When you propose a draft, include EXACTLY this tag: [DRAFT:message_id] so we can track it.
+- If the user just wants to chat, chat! You're friendly.
+- Keep responses under 3 sentences unless the user asks for details.
+- Never make up emails that aren't in the inbox.`;
+
+  const messages = [
+    { role: "system" as const, content: systemPrompt },
+    ...history.slice(-10),
+  ];
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages,
+        temperature: 0.5,
+        max_tokens: 300,
+      }),
+    });
+
+    const json = (await res.json()) as any;
+    let reply = json.choices?.[0]?.message?.content?.trim() ?? "Sorry, I blanked. Try again?";
+
+    console.log(`[bridge] LLM reply: "${reply}"`);
+
+    // Parse action tags
+    const sendMatch = reply.match(/\[SEND:([^\]]+)\]/);
+    const draftMatch = reply.match(/\[DRAFT:([^\]]+)\]/);
+
+    // Clean tags from user-visible response
+    let cleanReply = reply.replace(/\[SEND:[^\]]+\]/g, "").replace(/\[DRAFT:[^\]]+\]/g, "").trim();
+
+    if (sendMatch) {
+      const msgId = sendMatch[1];
+      const ranked = await findRanked(msgId);
+      if (ranked) {
+        const draft = pendingActions.get(from)?.draft ?? ranked.draftReply;
+        await handleApprove(ranked, draft, from);
+        cleanReply = cleanReply || `Done. Sent reply to ${ranked.inbound.from}.`;
+      }
+    }
+
+    if (draftMatch) {
+      const msgId = draftMatch[1];
+      const ranked = await findRanked(msgId);
+      if (ranked) {
+        // Extract the draft from the reply (the LLM should have included it)
+        pendingActions.set(from, { type: "send", ranked, draft: ranked.draftReply });
+
+        // Send with confirmation buttons
+        await sendInteractiveButtons(from, {
+          body: cleanReply,
+          buttons: [
+            { id: `send:${msgId}`, title: "Send Reply" },
+            { id: `edit:${msgId}`, title: "Edit Draft" },
+            { id: `skip:${msgId}`, title: "Skip" },
+          ],
+        });
+        addToHistory(from, "assistant", cleanReply);
+
+        if (isVoice) await sendVoice(from, cleanReply);
+        return;
+      }
+    }
+
+    // Regular text response
+    addToHistory(from, "assistant", cleanReply);
+    await sendText(from, cleanReply);
+
+    // Voice response if user sent voice
+    if (isVoice) await sendVoice(from, cleanReply);
+
+  } catch (err) {
+    console.error("[bridge] LLM error:", err);
+    await sendText(from, "Something went wrong. Try again?");
+  }
 }
 
-// ── Handle Approve ─────────────────────────────────────────────────────────
-async function handleApprove(ranked: RankedMessage, from: string) {
+// ── Conversation History ──────────────────────────────────────────────────
+function addToHistory(from: string, role: string, content: string) {
+  const history = conversations.get(from) ?? [];
+  history.push({ role, content });
+  if (history.length > 20) history.splice(0, history.length - 20);
+  conversations.set(from, history);
+}
+
+// ── Handle Approve ────────────────────────────────────────────────────────
+async function handleApprove(ranked: RankedMessage, draft: string, from: string) {
+  const id = crypto.randomUUID();
   const approved: ApprovedMessage = {
-    id: crypto.randomUUID(),
+    id,
     rankedMessageId: ranked.id,
-    finalReply: ranked.draftReply,
+    finalReply: draft,
     approvedVia: "button",
     approvedAt: new Date().toISOString(),
-    signature: "", // agent/signer.ts will sign
+    signature: sign(JSON.stringify({ id, rankedMessageId: ranked.id })),
   };
-
   nc.publish(SUBJECTS.APPROVED, jc.encode(approved));
-  rankedMessages.delete(ranked.id);
-
+  pendingActions.delete(from);
   await sendText(from, `✅ Sent to ${ranked.inbound.from} via ${ranked.inbound.channel}.`);
 }
 
-// ── Handle Voice Note ──────────────────────────────────────────────────────
-async function handleVoiceNote(audioId: string, from: string) {
-  // step 1: get audio URL from Meta
+// ── ElevenLabs Voice ──────────────────────────────────────────────────────
+async function sendVoice(to: string, text: string) {
+  if (!ELEVENLABS_API_KEY) return;
+
+  try {
+    console.log("[bridge] generating voice...");
+
+    const ttsRes = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      {
+        method: "POST",
+        headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      }
+    );
+
+    if (!ttsRes.ok) {
+      console.error("[bridge] ElevenLabs error:", ttsRes.status, await ttsRes.text());
+      return;
+    }
+
+    const mp3Buffer = Buffer.from(await ttsRes.arrayBuffer());
+    const mp3Path = join(tmpdir(), `voice-${Date.now()}.mp3`);
+    const oggPath = join(tmpdir(), `voice-${Date.now()}.ogg`);
+    writeFileSync(mp3Path, mp3Buffer);
+
+    try {
+      execSync(`ffmpeg -y -i "${mp3Path}" -c:a libopus -b:a 64k "${oggPath}" 2>/dev/null`);
+    } catch {
+      console.error("[bridge] ffmpeg failed");
+      unlinkSync(mp3Path);
+      return;
+    }
+
+    const oggBuffer = readFileSync(oggPath);
+    unlinkSync(mp3Path);
+    unlinkSync(oggPath);
+
+    // Upload to Meta
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("file", new Blob([oggBuffer], { type: "audio/ogg" }), "voice.ogg");
+    form.append("type", "audio/ogg");
+
+    const uploadRes = await fetch(
+      `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`,
+      { method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, body: form }
+    );
+    const uploadJson = (await uploadRes.json()) as { id?: string };
+    if (!uploadJson.id) { console.error("[bridge] upload failed:", uploadJson); return; }
+
+    await callWhatsAppAPI({
+      messaging_product: "whatsapp",
+      to,
+      type: "audio",
+      audio: { id: uploadJson.id },
+    });
+
+    console.log("[bridge] voice sent");
+  } catch (err) {
+    console.error("[bridge] voice error:", err);
+  }
+}
+
+// ── Voice Transcription ───────────────────────────────────────────────────
+async function transcribeVoice(audioId: string): Promise<string | null> {
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${audioId}`, {
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
   });
   const mediaJson = (await mediaRes.json()) as { url?: string };
-  if (!mediaJson.url) return;
+  if (!mediaJson.url) return null;
 
-  // step 2: download audio
   const audioRes = await fetch(mediaJson.url, {
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
   });
   const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
-
-  // step 3: transcribe with Groq Whisper
-  const transcript = await transcribeWithGroq(audioBuffer);
-  if (!transcript) {
-    await sendText(from, "Couldn't transcribe voice note. Try again or type your message.");
-    return;
-  }
-
-  await sendText(from, `🎤 "${transcript}"`);
-
-  // publish as inbound whatsapp message for the agent to handle
-  nc.publish(
-    SUBJECTS.INBOUND_WHATSAPP,
-    jc.encode({
-      id: crypto.randomUUID(),
-      channel: "whatsapp",
-      from,
-      body: transcript,
-      receivedAt: new Date().toISOString(),
-    })
-  );
-}
-
-// ── Groq Whisper Transcription ─────────────────────────────────────────────
-async function transcribeWithGroq(audioBuffer: Buffer): Promise<string | null> {
-  const GROQ_KEY = process.env.GROQ_API_KEY;
-  if (!GROQ_KEY) return null;
 
   const formData = new FormData();
   formData.append("file", new Blob([audioBuffer], { type: "audio/ogg" }), "audio.ogg");
@@ -269,118 +370,288 @@ async function transcribeWithGroq(audioBuffer: Buffer): Promise<string | null> {
   return json.text || null;
 }
 
-// ── Meta Cloud API Helpers ─────────────────────────────────────────────────
-async function sendText(to: string, body: string) {
-  await callWhatsAppAPI({
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body },
-  });
+// ── MongoDB Helper ────────────────────────────────────────────────────────
+async function findRanked(id: string): Promise<RankedMessage | null> {
+  const col = await rankedCol();
+  return col.findOne({ id }) as Promise<RankedMessage | null>;
 }
 
-async function sendInteractiveButtons(
-  to: string,
-  opts: { body: string; buttons: { id: string; title: string }[] }
-) {
+// ── WhatsApp API ──────────────────────────────────────────────────────────
+async function sendText(to: string, body: string) {
+  await callWhatsAppAPI({ messaging_product: "whatsapp", to, type: "text", text: { body } });
+}
+
+async function sendInteractiveButtons(to: string, opts: { body: string; buttons: { id: string; title: string }[] }) {
   await callWhatsAppAPI({
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
+    messaging_product: "whatsapp", to, type: "interactive",
     interactive: {
       type: "button",
       body: { text: opts.body },
-      action: {
-        buttons: opts.buttons.map((b) => ({
-          type: "reply",
-          reply: { id: b.id, title: b.title },
-        })),
-      },
-    },
-  });
-}
-
-async function sendInteractiveList(
-  to: string,
-  opts: {
-    body: string;
-    buttonText: string;
-    sections: { title: string; rows: { id: string; title: string; description: string }[] }[];
-  }
-) {
-  await callWhatsAppAPI({
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
-    interactive: {
-      type: "list",
-      body: { text: opts.body },
-      action: {
-        button: opts.buttonText,
-        sections: opts.sections,
-      },
+      action: { buttons: opts.buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title } })) },
     },
   });
 }
 
 async function callWhatsAppAPI(payload: unknown) {
-  const res = await fetch(
-    `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    }
-  );
-
-  if (!res.ok) {
-    const err = await res.text();
-    console.error("whatsapp api error:", res.status, err);
-  }
+  const res = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) console.error("[bridge] whatsapp error:", res.status, await res.text());
 }
 
-// ── NATS: Subscribe to ranked messages and send WhatsApp alerts ────────────
+// ── NATS: Score 8+ alerts ─────────────────────────────────────────────────
 async function subscribeToRanked() {
   const sub = nc.subscribe(SUBJECTS.RANKED);
-  console.log(`subscribed to ${SUBJECTS.RANKED}`);
+  console.log("[bridge] subscribed to messages.ranked");
 
   for await (const msg of sub) {
-    const ranked = jc.decode(msg.data) as RankedMessage;
-    rankedMessages.set(ranked.id, ranked);
+    try {
+      const ranked = jc.decode(msg.data) as RankedMessage;
+      console.log(`[bridge] ranked: ${ranked.category} (${ranked.score}) — ${ranked.inbound?.from}`);
 
-    // only alert for urgent and action-required
-    if (ranked.category === "urgent" || ranked.category === "action-required") {
-      await sendAlert(ranked, RECIPIENT_PHONE);
+      if (ranked.score >= 8) {
+        // Send conversational alert, not a structured dump
+        const alertText = `Hey — urgent one just came in. ${ranked.inbound.from} ${ranked.inbound.subject ? `about "${ranked.inbound.subject}"` : ""}: ${ranked.gist}`;
+
+        await sendInteractiveButtons(RECIPIENT_PHONE, {
+          body: alertText,
+          buttons: [
+            { id: `send:${ranked.id}`, title: "Send Reply" },
+            { id: `details:${ranked.id}`, title: "Details" },
+            { id: `skip:${ranked.id}`, title: "Skip" },
+          ],
+        });
+        console.log("[bridge] alert sent");
+      }
+    } catch (err) {
+      console.error("[bridge] ranked error:", err);
     }
   }
 }
 
-// ── NATS: Subscribe to sent confirmations ──────────────────────────────────
-async function subscribeToSent() {
-  const sub = nc.subscribe(SUBJECTS.SENT);
-  for await (const msg of sub) {
-    const sent = jc.decode(msg.data) as { approvedMessageId: string; channel: string };
-    console.log(`confirmed sent via ${sent.channel}: ${sent.approvedMessageId}`);
+// ── Web Dashboard Routes ──────────────────────────────────────────────────
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Serve the SPA
+app.get("/", (_req, res) => {
+  res.sendFile(join(__dirname, "../web/index.html"));
+});
+
+// SSE: real-time event stream
+const sseClients = new Set<express.Response>();
+
+app.get("/api/events", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write(":\n\n"); // heartbeat
+  sseClients.add(res);
+  req.on("close", () => sseClients.delete(res));
+});
+
+function broadcastSSE(event: string, data: unknown) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    client.write(payload);
   }
 }
 
-// ── Start ──────────────────────────────────────────────────────────────────
+// REST: paginated message history from MongoDB
+app.get("/api/messages", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const col = await rankedCol();
+    const messages = await col.find({}).sort({ rankedAt: -1 }).limit(limit).toArray();
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch messages" });
+  }
+});
+
+// Voice (text input from browser speech recognition — no Whisper needed)
+app.post("/api/voice-text", express.json(), async (req, res) => {
+  try {
+    const text = req.body?.text?.trim();
+    if (!text) { res.json({ reply: "Didn't catch that.", audioBase64: null }); return; }
+
+    const col = await rankedCol();
+    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
+    const inboxContext = recentMessages.map((m, i) =>
+      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
+    ).join("\n");
+
+    const webHistory = conversations.get("web") ?? [];
+    webHistory.push({ role: "user", content: text });
+    if (webHistory.length > 20) webHistory.splice(0, webHistory.length - 20);
+    conversations.set("web", webHistory);
+
+    const llmRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: `You are an AI inbox assistant. Be natural, casual, brief — like talking to a friend who manages your email.\n\nINBOX:\n${inboxContext || "Empty."}` },
+          ...webHistory.slice(-10),
+        ],
+        temperature: 0.5,
+        max_tokens: 150,
+      }),
+    });
+
+    const llmJson = (await llmRes.json()) as any;
+    const reply = llmJson.choices?.[0]?.message?.content?.trim()
+      ?.replace(/\[SEND:[^\]]+\]/g, "").replace(/\[DRAFT:[^\]]+\]/g, "").trim()
+      ?? "Sorry, I blanked.";
+
+    webHistory.push({ role: "assistant", content: reply });
+    conversations.set("web", webHistory);
+
+    // Generate TTS
+    let audioBase64: string | null = null;
+    if (ELEVENLABS_API_KEY) {
+      try {
+        const ttsRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+          method: "POST",
+          headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({ text: reply, model_id: "eleven_turbo_v2_5", voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
+        });
+        if (ttsRes.ok) audioBase64 = Buffer.from(await ttsRes.arrayBuffer()).toString("base64");
+      } catch {}
+    }
+
+    res.json({ reply, audioBase64 });
+  } catch (err) {
+    console.error("[bridge] voice-text error:", err);
+    res.status(500).json({ error: "Failed" });
+  }
+});
+
+// Voice: receive audio, transcribe, converse, return audio
+app.post("/api/voice", upload.single("audio"), async (req, res) => {
+  try {
+    if (!req.file) { res.status(400).json({ error: "No audio" }); return; }
+
+    // Save webm to temp, convert to ogg for Whisper
+    const webmPath = join(tmpdir(), `web-voice-${Date.now()}.webm`);
+    const oggPath = join(tmpdir(), `web-voice-${Date.now()}.ogg`);
+    writeFileSync(webmPath, req.file.buffer);
+
+    try {
+      execSync(`ffmpeg -y -i "${webmPath}" -c:a libopus -b:a 64k "${oggPath}" 2>/dev/null`);
+    } catch {
+      unlinkSync(webmPath);
+      res.status(500).json({ error: "Audio conversion failed" });
+      return;
+    }
+
+    const oggBuffer = readFileSync(oggPath);
+    unlinkSync(webmPath);
+    unlinkSync(oggPath);
+
+    // Transcribe with Groq Whisper
+    const formData = new FormData();
+    formData.append("file", new Blob([oggBuffer], { type: "audio/ogg" }), "audio.ogg");
+    formData.append("model", "whisper-large-v3");
+
+    const whisperRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROQ_KEY}` },
+      body: formData,
+    });
+    const whisperJson = (await whisperRes.json()) as { text?: string };
+    const transcript = whisperJson.text || "";
+
+    if (!transcript) { res.json({ transcript: "", reply: "Couldn't hear that.", audioBase64: null }); return; }
+
+    // Converse using the same engine (reuse converse logic inline)
+    const col = await rankedCol();
+    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
+    const inboxContext = recentMessages.map((m, i) =>
+      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
+    ).join("\n");
+
+    const webHistory = conversations.get("web") ?? [];
+    webHistory.push({ role: "user", content: transcript });
+    if (webHistory.length > 20) webHistory.splice(0, webHistory.length - 20);
+    conversations.set("web", webHistory);
+
+    const llmRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROQ_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: `You are an AI inbox assistant. Be natural and casual. Brief responses.\n\nINBOX:\n${inboxContext || "Empty."}` },
+          ...webHistory.slice(-10),
+        ],
+        temperature: 0.5,
+        max_tokens: 200,
+      }),
+    });
+
+    const llmJson = (await llmRes.json()) as any;
+    const reply = llmJson.choices?.[0]?.message?.content?.trim()
+      ?.replace(/\[SEND:[^\]]+\]/g, "").replace(/\[DRAFT:[^\]]+\]/g, "").trim()
+      ?? "Sorry, I blanked.";
+
+    webHistory.push({ role: "assistant", content: reply });
+    conversations.set("web", webHistory);
+
+    // Generate TTS
+    let audioBase64: string | null = null;
+    if (ELEVENLABS_API_KEY) {
+      try {
+        const ttsRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+          method: "POST",
+          headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({ text: reply, model_id: "eleven_turbo_v2_5", voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
+        });
+        if (ttsRes.ok) {
+          const mp3Buf = Buffer.from(await ttsRes.arrayBuffer());
+          audioBase64 = mp3Buf.toString("base64");
+        }
+      } catch {}
+    }
+
+    res.json({ transcript, reply, audioBase64 });
+  } catch (err) {
+    console.error("[bridge] voice API error:", err);
+    res.status(500).json({ error: "Voice processing failed" });
+  }
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────
 async function main() {
-  // connect to NATS
+  await getDb();
   nc = await connect({ servers: NATS_URL });
-  console.log(`connected to nats at ${NATS_URL}`);
+  console.log("[bridge] NATS connected");
 
-  // start NATS subscriptions
+  // Subscribe to NATS for SSE broadcasting
+  const allSub = nc.subscribe("messages.>");
+  (async () => {
+    for await (const msg of allSub) {
+      try {
+        const data = jc.decode(msg.data);
+        const subject = msg.subject;
+        if (subject.startsWith("messages.inbound.")) broadcastSSE("inbound", data);
+        else if (subject === "messages.ranked") broadcastSSE("ranked", data);
+        else if (subject === "messages.approved") broadcastSSE("approved", data);
+        else if (subject === "messages.sent") broadcastSSE("sent", data);
+      } catch {}
+    }
+  })();
+
   subscribeToRanked();
-  subscribeToSent();
 
-  // start express server
   app.listen(PORT, () => {
-    console.log(`whatsapp bridge listening on port ${PORT}`);
-    console.log(`webhook url: https://<your-railway-url>/webhook`);
+    console.log(`[bridge] listening on port ${PORT}`);
+    console.log(`[bridge] dashboard: http://localhost:${PORT}`);
   });
 }
 

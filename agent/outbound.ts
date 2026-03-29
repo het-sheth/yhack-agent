@@ -1,101 +1,84 @@
 import "dotenv/config";
 import { randomUUID } from "crypto";
 import { connect, JSONCodec } from "nats";
-import { createTransport } from "nodemailer";
+import { createTransport, type Transporter } from "nodemailer";
 import { SUBJECTS, NATS_URL } from "../shared/nats.js";
 import type { RankedMessage, ApprovedMessage, SentConfirmation } from "../shared/types.js";
 import { sign } from "./signer.js";
+import { getDb, rankedCol, sentCol } from "../shared/db.js";
 
-const rankedCodec = JSONCodec<RankedMessage>();
 const approvedCodec = JSONCodec<ApprovedMessage>();
 const sentCodec = JSONCodec<SentConfirmation>();
 
-// Cache ranked messages so we can look up the original inbound when approved
-const rankedCache = new Map<string, RankedMessage>();
+let emailTransport: Transporter | null = null;
 
-function env(key: string): string {
-  const v = process.env[key];
-  if (!v) throw new Error(`Missing env var: ${key}`);
-  return v;
-}
-
-async function main() {
-  console.log("[outbound] Connecting to NATS...");
-  const nc = await connect({ servers: NATS_URL });
-  console.log(`[outbound] NATS connected: ${NATS_URL}`);
-
-  const transport = createTransport({
+function getEmailTransport(): Transporter {
+  if (emailTransport) return emailTransport;
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  if (!user || !pass) throw new Error("GMAIL_USER and GMAIL_APP_PASSWORD required");
+  emailTransport = createTransport({
     host: "smtp.gmail.com",
     port: 587,
     secure: false,
-    auth: {
-      user: env("GMAIL_USER"),
-      pass: env("GMAIL_APP_PASSWORD"),
-    },
+    auth: { user, pass },
   });
+  return emailTransport;
+}
 
-  // Cache all ranked messages
-  const rankedSub = nc.subscribe(SUBJECTS.RANKED);
-  (async () => {
-    for await (const msg of rankedSub) {
-      try {
-        const ranked = rankedCodec.decode(msg.data);
-        rankedCache.set(ranked.id, ranked);
-      } catch (err) {
-        console.error("[outbound] Failed to cache ranked message:", err);
-      }
-    }
-  })();
+async function main() {
+  await getDb();
+  const nc = await connect({ servers: NATS_URL });
+  console.log(`[outbound] NATS connected: ${NATS_URL}`);
 
-  // Process approved messages
+  const ranked = await rankedCol();
+  const sent = await sentCol();
+
   const approvedSub = nc.subscribe(SUBJECTS.APPROVED);
   console.log("[outbound] Subscribed to messages.approved — waiting...");
 
   for await (const msg of approvedSub) {
     try {
       const approved = approvedCodec.decode(msg.data);
-      const ranked = rankedCache.get(approved.rankedMessageId);
 
-      if (!ranked) {
-        console.warn(
-          `[outbound] No cached ranked message for ${approved.rankedMessageId} — skipping`
-        );
+      // Look up from MongoDB instead of in-memory cache
+      const rankedMsg = await ranked.findOne({ id: approved.rankedMessageId }) as RankedMessage | null;
+
+      if (!rankedMsg) {
+        console.warn(`[outbound] No ranked message for ${approved.rankedMessageId} — skipping`);
         continue;
       }
 
-      const channel = ranked.inbound.channel;
-      const recipient = ranked.inbound.from;
+      const channel = rankedMsg.inbound.channel;
+      const recipient = rankedMsg.inbound.from;
+
+      // SAFETY: always send to ourselves in demo mode
+      const DEMO_MODE = process.env.DEMO_MODE !== "false";
+      const safeTo = DEMO_MODE ? process.env.GMAIL_USER! : recipient;
 
       if (channel === "email") {
+        const transport = getEmailTransport();
         await transport.sendMail({
-          from: env("GMAIL_USER"),
-          to: recipient,
-          subject: `Re: ${ranked.inbound.subject ?? "(no subject)"}`,
-          text: approved.finalReply,
+          from: process.env.GMAIL_USER,
+          to: safeTo,
+          subject: `Re: ${rankedMsg.inbound.subject ?? "(no subject)"}`,
+          text: `[Reply to: ${recipient}]\n\n${approved.finalReply}`,
         });
-        console.log(`[outbound] Sent email reply to ${recipient}`);
+        console.log(`[outbound] Sent email to ${safeTo}${DEMO_MODE ? ` (demo — original: ${recipient})` : ""}`);
       } else if (channel === "slack") {
-        console.log(
-          `[outbound] Slack reply not yet implemented — would reply to ${recipient} in thread ${ranked.inbound.threadId}`
-        );
+        console.log(`[outbound] Slack reply not yet implemented — would reply to ${recipient}`);
+        continue;
       } else {
-        console.log(
-          `[outbound] Channel "${channel}" reply not implemented — skipping`
-        );
+        console.log(`[outbound] Channel "${channel}" not implemented — skipping`);
+        continue;
       }
 
       const id = randomUUID();
-      const confirmation: SentConfirmation = {
-        id,
-        approvedMessageId: approved.id,
-        channel,
-        sentAt: new Date().toISOString(),
-        signature: sign(
-          JSON.stringify({ id, approvedMessageId: approved.id, channel })
-        ),
-      };
+      const unsigned = { id, approvedMessageId: approved.id, channel, sentAt: new Date().toISOString() };
+      const confirmation: SentConfirmation = { ...unsigned, signature: sign(JSON.stringify(unsigned)) };
 
       nc.publish(SUBJECTS.SENT, sentCodec.encode(confirmation));
+      await sent.insertOne(confirmation as any).catch(() => {});
       console.log(`[outbound] Confirmation published for ${approved.id}`);
     } catch (err) {
       console.error("[outbound] Failed to process approval:", err);

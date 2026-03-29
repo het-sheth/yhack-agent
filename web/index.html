@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inbox Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    .card-enter { animation: slideIn 0.3s ease-out; }
+    @keyframes breathe { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.08); opacity: 1; } }
+    .breathe { animation: breathe 2s ease-in-out infinite; }
+    .sig { font-family: monospace; font-size: 10px; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+  <header class="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-3 h-3 rounded-full bg-green-500 breathe"></div>
+      <h1 class="text-xl font-bold">Inbox Agent</h1>
+      <span class="px-2 py-0.5 bg-blue-900/50 text-blue-300 text-xs rounded-full">Insurance Broker</span>
+    </div>
+    <div class="flex gap-4 text-sm">
+      <span class="text-red-400"><span id="s-u">0</span> urgent</span>
+      <span class="text-yellow-400"><span id="s-a">0</span> action</span>
+      <span class="text-green-400"><span id="s-f">0</span> FYI</span>
+      <span class="text-gray-500"><span id="s-t">0</span> total</span>
+    </div>
+  </header>
+
+  <div class="border-b border-gray-800 px-6 flex gap-1">
+    <button onclick="showTab('dash')" id="t-dash" class="px-4 py-2 text-sm font-medium border-b-2 border-blue-500 text-blue-400">Dashboard</button>
+    <button onclick="showTab('voice')" id="t-voice" class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500">Voice</button>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="p-dash" class="p-6">
+    <div id="feed" class="space-y-3 max-w-4xl mx-auto"></div>
+    <p id="empty" class="text-center text-gray-600 py-20">Waiting for messages...</p>
+  </div>
+
+  <!-- Voice -->
+  <div id="p-voice" class="p-6 hidden">
+    <div class="max-w-lg mx-auto flex flex-col items-center">
+      <!-- Model selector -->
+      <div class="w-full flex items-center justify-center gap-2 mb-4">
+        <span class="text-xs text-gray-500">Voice Engine:</span>
+        <select id="voice-model" onchange="onVoiceModelChange()" class="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded px-3 py-1 focus:outline-none focus:border-blue-500">
+          <option value="eleven-convai">ElevenLabs Agent (best quality, barge-in)</option>
+          <option value="gemini-live">Gemini Live (real-time)</option>
+          <option value="groq-eleven">Groq + ElevenLabs (fallback)</option>
+        </select>
+      </div>
+
+      <div id="vhist" class="w-full space-y-3 max-h-[50vh] overflow-y-auto mb-6 px-2"></div>
+
+      <div id="orb" class="w-36 h-36 rounded-full bg-gray-800 flex items-center justify-center cursor-pointer transition-all duration-300 mb-3">
+        <svg class="w-12 h-12 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v4m-4 0h8m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+        </svg>
+      </div>
+      <p id="vstat" class="text-sm text-gray-500">Tap to start conversation</p>
+
+      <!-- Text input fallback -->
+      <div class="w-full mt-6 flex gap-2">
+        <input id="vtextinput" type="text" placeholder="Type a message..." class="flex-1 bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500" onkeydown="if(event.key==='Enter')sendTextMessage()">
+        <button onclick="sendTextMessage()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg">Send</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ── Tabs ──
+function showTab(t) {
+  document.getElementById('p-dash').classList.toggle('hidden', t !== 'dash');
+  document.getElementById('p-voice').classList.toggle('hidden', t !== 'voice');
+  ['dash','voice'].forEach(k => {
+    const el = document.getElementById('t-'+k);
+    el.classList.toggle('border-blue-500', t===k);
+    el.classList.toggle('text-blue-400', t===k);
+    el.classList.toggle('border-transparent', t!==k);
+    el.classList.toggle('text-gray-500', t!==k);
+  });
+}
+
+// ── Dashboard ──
+const catStyle = {
+  'urgent': {bg:'bg-red-900/30',bd:'border-red-700',badge:'bg-red-600',label:'URGENT'},
+  'action-required': {bg:'bg-yellow-900/20',bd:'border-yellow-700',badge:'bg-yellow-600',label:'ACTION'},
+  'fyi': {bg:'bg-green-900/20',bd:'border-green-800',badge:'bg-green-700',label:'FYI'},
+  'low-priority': {bg:'bg-gray-900/30',bd:'border-gray-700',badge:'bg-gray-600',label:'LOW'},
+};
+let st = {u:0,a:0,f:0,t:0};
+
+function addCard(m) {
+  const s = catStyle[m.category]||catStyle.fyi;
+  const sig = m.signature ? m.signature.slice(0,16)+'...' : '';
+  const sc = m.score>=8?'text-red-400':m.score>=5?'text-yellow-400':'text-green-400';
+  document.getElementById('feed').insertAdjacentHTML('afterbegin',
+    `<div class="card-enter border ${s.bd} ${s.bg} rounded-lg p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="px-1.5 py-0.5 ${s.badge} text-white text-[10px] font-bold rounded">${s.label}</span>
+            <span class="text-xs text-gray-500">${new Date(m.rankedAt||'').toLocaleTimeString()}</span>
+            <span class="text-xs text-gray-600">${m.inbound?.channel||''}</span>
+          </div>
+          <p class="text-sm font-medium text-gray-200 truncate">${m.inbound?.from||''}</p>
+          <p class="text-xs text-gray-400 truncate">${m.inbound?.subject||''}</p>
+          <p class="text-sm text-gray-300 mt-1">${m.gist||''}</p>
+        </div>
+        <div class="text-right shrink-0"><div class="text-2xl font-bold ${sc}">${m.score}</div><div class="text-[10px] text-gray-600">/10</div></div>
+      </div>
+      ${sig?`<div class="sig text-gray-700 mt-1">sig: ${sig}</div>`:''}
+    </div>`);
+  document.getElementById('empty').classList.add('hidden');
+  st.t++; if(m.category==='urgent')st.u++; else if(m.category==='action-required')st.a++; else st.f++;
+  document.getElementById('s-u').textContent=st.u;
+  document.getElementById('s-a').textContent=st.a;
+  document.getElementById('s-f').textContent=st.f;
+  document.getElementById('s-t').textContent=st.t;
+}
+
+fetch('/api/messages').then(r=>r.json()).then(msgs=>msgs.forEach(addCard)).catch(()=>{});
+
+// Bind orb click with proper event listener
+document.getElementById('orb').addEventListener('click', function() {
+  console.log('Orb clicked, model:', document.getElementById('voice-model').value);
+  orbClick();
+});
+const sse = new EventSource('/api/events');
+sse.addEventListener('ranked', e => addCard(JSON.parse(e.data)));
+sse.addEventListener('approved', () => {
+  document.getElementById('feed').insertAdjacentHTML('afterbegin',
+    '<div class="card-enter border border-green-700 bg-green-900/20 rounded-lg p-3 text-sm text-green-300">Reply approved and sent</div>');
+});
+
+// ── Voice: Shared State ──
+let active = false;
+let audioCtx = null;
+
+function setOrb(state) {
+  const orb = document.getElementById('orb');
+  const stat = document.getElementById('vstat');
+  const colors = { idle: 'bg-gray-800', listening: 'bg-blue-900/50 shadow-lg shadow-blue-500/30 breathe', thinking: 'bg-yellow-900/30', speaking: 'bg-green-900/30 shadow-lg shadow-green-500/20 breathe' };
+  const labels = { idle: 'Tap to start conversation', listening: 'Listening...', thinking: 'Thinking...', speaking: 'Speaking...' };
+  orb.className = `w-36 h-36 rounded-full ${colors[state]||colors.idle} flex items-center justify-center cursor-pointer transition-all duration-300 mb-3`;
+  stat.textContent = labels[state] || '';
+}
+
+function addBubble(text, isUser) {
+  const hist = document.getElementById('vhist');
+  const align = isUser ? 'justify-end' : 'justify-start';
+  const bg = isUser ? 'bg-blue-600' : 'bg-gray-800';
+  hist.insertAdjacentHTML('beforeend', `<div class="flex ${align}"><div class="${bg} rounded-lg px-3 py-2 max-w-[80%]"><p class="text-sm">${text}</p></div></div>`);
+  hist.scrollTop = hist.scrollHeight;
+}
+
+function onVoiceModelChange() {
+  // Auto-stop any active engine when switching dropdown
+  if (active) {
+    stopEleven();
+    stopGemini();
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+      recorder.stream.getTracks().forEach(t => t.stop());
+    }
+    clearInterval(vadInterval);
+    active = false;
+    setOrb('idle');
+  }
+}
+
+function orbClick() {
+  const model = document.getElementById('voice-model').value;
+  console.log('orbClick dispatch:', model, 'active:', active);
+
+  // If active, stop current engine
+  if (active) {
+    stopEleven();
+    stopGemini();
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+      recorder.stream.getTracks().forEach(t => t.stop());
+    }
+    clearInterval(vadInterval);
+    active = false;
+    setOrb('idle');
+    return;
+  }
+
+  if (model === 'eleven-convai') orbClickEleven();
+  else if (model === 'gemini-live') orbClickGemini();
+  else orbClickGroq();
+}
+
+// ══════════════════════════════════════════════════════════
+// ── ElevenLabs Conversational AI: WebSocket voice agent ──
+// ══════════════════════════════════════════════════════════
+let elevenWs = null;
+let elevenStream = null;
+let elevenProcessor = null;
+let elevenNextPlay = 0;
+
+async function orbClickEleven() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  if (active) { stopEleven(); return; }
+  active = true;
+  setOrb('thinking');
+  document.getElementById('vstat').textContent = 'Connecting...';
+
+  try {
+    // Get signed URL + inbox context from our server
+    const sessionRes = await fetch('/api/eleven-session');
+    const session = await sessionRes.json();
+    if (!session.signedUrl) throw new Error('No signed URL');
+
+    elevenWs = new WebSocket(session.signedUrl);
+
+    elevenWs.onopen = () => {
+      console.log('ElevenLabs connected');
+
+      // Send conversation initiation with inbox context and overrides
+      elevenWs.send(JSON.stringify({
+        type: "conversation_initiation_client_data",
+        conversation_config_override: {
+          agent: {
+            prompt: {
+              prompt: "You are Sarah, an inbox assistant. Warm, casual, never say you're AI. CRITICAL RULES: Max 2 sentences per turn. FINISH every sentence. Never use 'Also' at the end. If listing emails, say at most 3 per turn — user can ask for more.\n\nUser is an insurance broker. Inbox:\n" + session.inboxContext
+            },
+            first_message: "Hey! You've got some new messages. Want me to run through them?"
+          },
+          tts: {
+            optimize_streaming_latency: 3
+          }
+        }
+      }));
+    };
+
+    elevenWs.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === 'conversation_initiation_metadata') {
+        console.log('ElevenLabs session started:', msg.conversation_initiation_metadata_event?.conversation_id);
+        startElevenMic();
+        setOrb('listening');
+      }
+
+      // Agent audio chunk — play immediately
+      if (msg.type === 'audio') {
+        setOrb('speaking');
+        playElevenChunk(msg.audio?.chunk || msg.audio_event?.audio_base_64);
+      }
+
+      // Agent text transcript
+      if (msg.type === 'agent_response') {
+        const text = msg.agent_response_event?.agent_response;
+        if (text) addBubble(text, false);
+      }
+
+      // User transcript
+      if (msg.type === 'user_transcript') {
+        const text = msg.user_transcription_event?.user_transcript;
+        if (text) addBubble(text, true);
+      }
+
+      // Agent done speaking
+      if (msg.type === 'agent_response_correction' || msg.type === 'turn_end') {
+        setOrb('listening');
+      }
+
+      // Interruption detected
+      if (msg.type === 'interruption') {
+        elevenNextPlay = 0; // clear audio queue
+        setOrb('listening');
+      }
+    };
+
+    elevenWs.onerror = (e) => {
+      console.error('ElevenLabs error:', e);
+      document.getElementById('vstat').textContent = 'Connection error';
+      stopEleven();
+    };
+
+    elevenWs.onclose = () => {
+      console.log('ElevenLabs disconnected');
+      if (active) stopEleven();
+    };
+
+  } catch(e) {
+    console.error('ElevenLabs start error:', e);
+    document.getElementById('vstat').textContent = 'Error: ' + e.message;
+    active = false;
+    setOrb('idle');
+  }
+}
+
+let elevenMicEnabled = true;
+
+async function startElevenMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  elevenStream = stream;
+
+  const source = audioCtx.createMediaStreamSource(stream);
+  elevenProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+  elevenProcessor.onaudioprocess = (e) => {
+    if (!elevenWs || elevenWs.readyState !== WebSocket.OPEN) return;
+
+    const input = e.inputBuffer.getChannelData(0);
+    const sampleRate = audioCtx.sampleRate;
+
+    // Resample to 16kHz
+    const ratio = sampleRate / 16000;
+    const newLength = Math.round(input.length / ratio);
+    const resampled = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      resampled[i] = input[Math.round(i * ratio)];
+    }
+
+    // Convert to 16-bit PCM
+    const pcm = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32767)));
+    }
+
+    // Base64 encode
+    const bytes = new Uint8Array(pcm.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+
+    elevenWs.send(JSON.stringify({
+      user_audio_chunk: btoa(binary)
+    }));
+  };
+
+  source.connect(elevenProcessor);
+  elevenProcessor.connect(audioCtx.destination);
+}
+
+function playElevenChunk(b64) {
+  if (!b64) return;
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const pcm16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+
+  if (float32.length === 0) return;
+
+  const buffer = audioCtx.createBuffer(1, float32.length, 16000);
+  buffer.getChannelData(0).set(float32);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  const startAt = Math.max(now, elevenNextPlay);
+  source.start(startAt);
+  elevenNextPlay = startAt + buffer.duration;
+}
+
+function stopEleven() {
+  try { if (elevenWs) { elevenWs.close(); elevenWs = null; } } catch {}
+  try { if (elevenStream) { elevenStream.getTracks().forEach(t => t.stop()); elevenStream = null; } } catch {}
+  try { if (elevenProcessor) { elevenProcessor.disconnect(); elevenProcessor = null; } } catch {}
+  elevenNextPlay = 0;
+}
+
+// ══════════════════════════════════════════════════════════
+// ── Gemini Live: WebSocket real-time voice ──
+// ══════════════════════════════════════════════════════════
+let geminiWs = null;
+let geminiStream = null;
+let geminiProcessor = null;
+let geminiPlayQueue = [];
+let geminiPlaying = false;
+
+async function orbClickGemini() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+  } catch(e) {
+    document.getElementById('vstat').textContent = 'Audio error: ' + e.message;
+    return;
+  }
+
+  if (active) { stopGemini(); return; }
+  active = true;
+  setOrb('thinking');
+  document.getElementById('vstat').textContent = 'Connecting to Gemini...';
+
+  // Get API key from server
+  let apiKey;
+  try {
+    const res = await fetch('/api/gemini-key');
+    const data = await res.json();
+    apiKey = data.key;
+    if (!apiKey) throw new Error('No key returned');
+  } catch(e) {
+    document.getElementById('vstat').textContent = 'Key error: ' + e.message;
+    setOrb('idle'); active = false; return;
+  }
+
+  // Connect WebSocket to Gemini Live API
+  const model = 'gemini-2.5-flash-native-audio-latest';
+  const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+  geminiWs = new WebSocket(wsUrl);
+
+  geminiWs.onopen = () => {
+    console.log('Gemini WS connected');
+    document.getElementById('vstat').textContent = 'Connected — setting up...';
+    geminiWs.send(JSON.stringify({
+      setup: {
+        model: `models/${model}`,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }
+          }
+        },
+        systemInstruction: {
+          parts: [{ text: `You are an AI inbox assistant. You're having a voice conversation. Be natural, casual, brief — like a smart receptionist.
+
+The user is an insurance broker. Help them manage their inbox. When they ask about emails, summarize naturally. When they want to reply, draft something and ask for confirmation.
+
+Keep responses SHORT — 1-3 sentences max. This is a real-time voice conversation, not an essay.` }]
+        }
+      }
+    }));
+
+    // Mic starts after setupComplete is received
+  };
+
+  geminiWs.onmessage = async (event) => {
+    let msg;
+    try {
+      const text = typeof event.data === 'string' ? event.data : await event.data.text();
+      msg = JSON.parse(text);
+      console.log('Gemini msg:', Object.keys(msg));
+    } catch(e) {
+      console.log('Non-JSON message');
+      return;
+    }
+
+    // Setup complete — start mic
+    if (msg.setupComplete !== undefined) {
+      console.log('Setup complete — starting mic');
+      startGeminiMic();
+      setOrb('listening');
+      return;
+    }
+
+    // Server content
+    if (msg.serverContent) {
+      const parts = msg.serverContent.modelTurn?.parts || [];
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          setOrb('speaking');
+          playGeminiChunk(part.inlineData.data);
+        }
+        if (part.text) {
+          addBubble(part.text, false);
+        }
+      }
+
+      if (msg.serverContent.inputTranscript) {
+        addBubble(msg.serverContent.inputTranscript, true);
+      }
+
+      if (msg.serverContent.turnComplete) {
+        setOrb('listening');
+      }
+    }
+  };
+
+  geminiWs.onerror = (e) => {
+    console.error('Gemini WS error:', e);
+    document.getElementById('vstat').textContent = 'Connection error — try Groq+ElevenLabs';
+    stopGemini();
+  };
+  geminiWs.onclose = (e) => {
+    console.log('Gemini WS closed:', e.code, e.reason);
+    if (active) {
+      document.getElementById('vstat').textContent = 'Disconnected: ' + (e.reason || e.code);
+      stopGemini();
+    }
+  };
+}
+
+async function startGeminiMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+  geminiStream = stream;
+
+  // Use ScriptProcessor to get raw PCM (AudioWorklet is better but more complex)
+  const source = audioCtx.createMediaStreamSource(stream);
+  geminiProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+  geminiProcessor.onaudioprocess = (e) => {
+    if (!geminiWs || geminiWs.readyState !== WebSocket.OPEN) return;
+
+    const input = e.inputBuffer.getChannelData(0);
+
+    // Resample to 16kHz if needed
+    const sampleRate = audioCtx.sampleRate;
+    const targetRate = 16000;
+    let samples;
+    if (sampleRate !== targetRate) {
+      const ratio = sampleRate / targetRate;
+      const newLength = Math.round(input.length / ratio);
+      samples = new Float32Array(newLength);
+      for (let i = 0; i < newLength; i++) {
+        samples[i] = input[Math.round(i * ratio)];
+      }
+    } else {
+      samples = input;
+    }
+
+    // Convert to 16-bit PCM
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    }
+
+    // Convert to base64
+    const bytes = new Uint8Array(pcm.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+
+    geminiWs.send(JSON.stringify({
+      realtimeInput: {
+        mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: b64 }]
+      }
+    }));
+  };
+
+  source.connect(geminiProcessor);
+  geminiProcessor.connect(audioCtx.destination);
+}
+
+// Gemini audio: jitter buffer to avoid choppy playback
+let nextPlayTime = 0;
+let geminiChunkBuffer = [];
+let geminiBuffering = true;
+const GEMINI_BUFFER_COUNT = 3; // buffer this many chunks before starting playback
+
+function playGeminiChunk(b64Data) {
+  const binary = atob(b64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const pcm16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+
+  if (float32.length === 0) return;
+
+  if (geminiBuffering) {
+    geminiChunkBuffer.push(float32);
+    if (geminiChunkBuffer.length >= GEMINI_BUFFER_COUNT) {
+      geminiBuffering = false;
+      nextPlayTime = audioCtx.currentTime + 0.05; // small lead time
+      geminiChunkBuffer.forEach(chunk => scheduleGeminiAudio(chunk));
+      geminiChunkBuffer = [];
+    }
+    return;
+  }
+
+  scheduleGeminiAudio(float32);
+}
+
+function scheduleGeminiAudio(float32) {
+  // Gemini outputs 24kHz PCM
+  const buffer = audioCtx.createBuffer(1, float32.length, 24000);
+  buffer.getChannelData(0).set(float32);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+  const startAt = Math.max(now, nextPlayTime);
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+}
+
+function stopGemini() {
+  try { if (geminiWs) { geminiWs.close(); geminiWs = null; } } catch {}
+  try { if (geminiStream) { geminiStream.getTracks().forEach(t => t.stop()); geminiStream = null; } } catch {}
+  try { if (geminiProcessor) { geminiProcessor.disconnect(); geminiProcessor = null; } } catch {}
+  geminiChunkBuffer = [];
+  geminiBuffering = true;
+  nextPlayTime = 0;
+}
+
+// ══════════════════════════════════════════════════════════
+// ── Groq + ElevenLabs: Record → Transcribe → TTS ──
+// ══════════════════════════════════════════════════════════
+let recorder = null;
+let chunks = [];
+let analyser = null;
+let vadInterval = null;
+
+async function orbClickGroq() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  if (active) { finishGroq(); return; }
+  active = true;
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recorder = new MediaRecorder(stream);
+    chunks = [];
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = processGroq;
+    recorder.start();
+    setOrb('listening');
+
+    // VAD: auto-stop after 1.5s silence
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let speaking = false, silent = 0;
+
+    vadInterval = setInterval(() => {
+      if (!active) return;
+      analyser.getByteFrequencyData(data);
+      const vol = data.reduce((a,b) => a+b, 0) / data.length;
+      if (vol > 15) { speaking = true; silent = 0; }
+      else if (speaking) { silent++; if (silent > 30) finishGroq(); }
+    }, 50);
+  } catch(e) {
+    document.getElementById('vstat').textContent = 'Mic access denied';
+    active = false;
+  }
+}
+
+function finishGroq() {
+  if (!active || !recorder || recorder.state !== 'recording') return;
+  active = false;
+  clearInterval(vadInterval);
+  setOrb('thinking');
+  recorder.stop();
+  recorder.stream.getTracks().forEach(t => t.stop());
+}
+
+// ── Text input for Voice tab ──
+async function sendTextMessage() {
+  const input = document.getElementById('vtextinput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addBubble(text, true);
+  setOrb('thinking');
+
+  try {
+    const res = await fetch('/api/voice-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    addBubble(data.reply, false);
+
+    if (data.audioBase64) {
+      setOrb('speaking');
+      const audio = new Audio('data:audio/mp3;base64,' + data.audioBase64);
+      audio.onended = () => setOrb('idle');
+      audio.onerror = () => setOrb('idle');
+      await audio.play().catch(() => setOrb('idle'));
+    } else {
+      setOrb('idle');
+    }
+  } catch(e) {
+    addBubble('Error: ' + e.message, false);
+    setOrb('idle');
+  }
+}
+
+async function processGroq() {
+  const blob = new Blob(chunks, { type: 'audio/webm' });
+  const form = new FormData();
+  form.append('audio', blob, 'voice.webm');
+
+  try {
+    const res = await fetch('/api/voice', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.transcript) addBubble(data.transcript, true);
+    addBubble(data.reply, false);
+
+    if (data.audioBase64) {
+      setOrb('speaking');
+      const audio = new Audio('data:audio/mp3;base64,' + data.audioBase64);
+      audio.onended = () => { setOrb('idle'); setTimeout(() => orbClickGroq(), 500); };
+      audio.onerror = () => setOrb('idle');
+      await audio.play().catch(() => setOrb('idle'));
+    } else {
+      setOrb('idle');
+    }
+  } catch(e) { setOrb('idle'); }
+}
+</script>
+</body>
+</html>

@@ -192,21 +192,26 @@ export default function Home() {
     return () => sse.close();
   }, []);
 
-  useEffect(() => { chatRef.current = chat; chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
+
+  // Keep chatRef in sync synchronously for triggerSend/extractDraft
+  function addChat(entry: { text: string; isUser: boolean }) {
+    setChat((h) => { const next = [...h, entry]; chatRef.current = next; return next; });
+  }
 
   // ── Text chat ──
   async function sendTextMsg() {
     const text = textInput.trim();
     if (!text) return;
     setTextInput("");
-    setChat((h) => [...h, { text, isUser: true }]);
+    addChat({ text, isUser: true });
     setOrbState("thinking");
     try {
       const res = await fetch("/api/voice-text", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
       const data = await res.json();
-      setChat((h) => [...h, { text: data.reply, isUser: false }]);
+      addChat({ text: data.reply, isUser: false });
       setOrbState("idle");
-    } catch { setChat((h) => [...h, { text: "Something went wrong.", isUser: false }]); setOrbState("idle"); }
+    } catch { addChat({ text: "Something went wrong.", isUser: false }); setOrbState("idle"); }
   }
 
   // ── ElevenLabs ──
@@ -248,7 +253,7 @@ export default function Home() {
       const msg = chatRef.current[i];
       if (msg.isUser) continue;
       // Skip the "Sending it now" message itself
-      if (/sending it now/i.test(msg.text)) continue;
+      if (/sending it now|i've sent|i.ve sent|sent the (response|reply|message)/i.test(msg.text)) continue;
       // The previous agent message is likely the draft
       // Extract text between quotes if present, otherwise use the whole message
       const quoted = msg.text.match(/"([^"]+)"/);
@@ -286,7 +291,7 @@ export default function Home() {
       if (!draft) return;
 
       const approveRes = await fetch("/api/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messageId: target.id, draft }) });
-      if (approveRes.ok) { const result = await approveRes.json(); if (result.ok) { lastApprovedRef.current = target.id; setChat((h) => [...h, { text: `Reply sent to ${result.to}`, isUser: false }]); } }
+      if (approveRes.ok) { const result = await approveRes.json(); if (result.ok) { lastApprovedRef.current = target.id; addChat({ text: `Reply sent to ${result.to}`, isUser: false }); } }
     } finally { sendInFlightRef.current = false; }
   }
 
@@ -316,7 +321,7 @@ export default function Home() {
   }
 
   const orbClick = useCallback(async () => {
-    if (activeRef.current) { stopEleven(); activeRef.current = false; setOrbState("idle"); return; }
+    if (activeRef.current) { stopEleven(); activeRef.current = false; setOrbState("idle"); setNewMsgDuringVoice(false); return; }
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
     if (audioCtxRef.current.state === "suspended") await audioCtxRef.current.resume();
     activeRef.current = true;
@@ -332,13 +337,13 @@ export default function Home() {
         const msg = JSON.parse(event.data);
         if (msg.type === "conversation_initiation_metadata") { startMic(ws); setOrbState("listening"); }
         if (msg.type === "audio") { setOrbState("speaking"); playChunk(msg.audio?.chunk || msg.audio_event?.audio_base_64); }
-        if (msg.type === "agent_response") { const text = msg.agent_response_event?.agent_response; if (text) { setChat((h) => [...h, { text, isUser: false }]); if (/sending it now/i.test(text)) triggerSend(text); } }
-        if (msg.type === "user_transcript") { const text = msg.user_transcription_event?.user_transcript; if (text) setChat((h) => [...h, { text, isUser: true }]); }
+        if (msg.type === "agent_response") { const text = msg.agent_response_event?.agent_response; if (text) { addChat({ text, isUser: false }); if (/sending it now|i've sent|i.ve sent|sent the (response|reply|message)/i.test(text)) triggerSend(text); } }
+        if (msg.type === "user_transcript") { const text = msg.user_transcription_event?.user_transcript; if (text) addChat({ text, isUser: true }); }
         if (msg.type === "agent_response_correction" || msg.type === "turn_end") setOrbState("listening");
         if (msg.type === "interruption") { clearAudio(); setOrbState("listening"); }
       };
-      ws.onerror = () => { stopEleven(); activeRef.current = false; setOrbState("idle"); };
-      ws.onclose = () => { stopEleven(); activeRef.current = false; setOrbState("idle"); };
+      ws.onerror = () => { stopEleven(); activeRef.current = false; setOrbState("idle"); setNewMsgDuringVoice(false); };
+      ws.onclose = () => { stopEleven(); activeRef.current = false; setOrbState("idle"); setNewMsgDuringVoice(false); };
     } catch { stopEleven(); activeRef.current = false; setOrbState("idle"); }
   }, []);
 

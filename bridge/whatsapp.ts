@@ -52,8 +52,9 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
 }
 
 // Capture raw body per-request for webhook signature verification
+import "../shared/express.js";
 app.use(express.json({
-  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
+  verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -71,8 +72,8 @@ const jc = JSONCodec();
 let nc: NatsConnection;
 
 // Build inbox context string with replied status
-function buildInboxContext(messages: any[]): string {
-  return messages.map((m: any, i: number) => {
+function buildInboxContext(messages: RankedMessage[]): string {
+  return messages.map((m, i) => {
     const status = m.repliedAt ? "REPLIED" : m.category.toUpperCase();
     return `[${i+1}] ${status} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}${m.repliedAt ? " [already replied]" : ""}`;
   }).join("\n") || "Inbox is empty.";
@@ -89,7 +90,7 @@ function verifyWebhookSignature(req: express.Request): boolean {
   if (!META_APP_SECRET) return true; // skip in dev if not configured
   const sig = req.headers["x-hub-signature-256"] as string;
   if (!sig) return false;
-  const body = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
+  const body = req.rawBody || Buffer.from(JSON.stringify(req.body));
   const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
     .update(body).digest("hex");
   try {
@@ -571,7 +572,9 @@ app.post("/api/approve", requireAuth, apiLimiter, express.json(), async (req, re
 
     // Mark as replied in MongoDB so it doesn't keep showing up
     const col = await rankedCol();
-    await col.updateOne({ id: messageId }, { $set: { repliedAt: new Date().toISOString(), repliedWith: finalDraft } }).catch(() => {});
+    await col.updateOne({ id: messageId }, { $set: { repliedAt: new Date().toISOString(), repliedWith: finalDraft } }).catch((err: unknown) => {
+      console.error("[bridge] Failed to mark message as replied:", err);
+    });
 
     console.log(`[bridge] Web approve: sent reply for ${ranked.inbound.from}`);
     res.json({ ok: true, to: ranked.inbound.from, channel: ranked.inbound.channel });

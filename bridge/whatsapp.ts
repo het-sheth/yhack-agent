@@ -40,12 +40,23 @@ const API_SECRET = process.env.API_SECRET;
 
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!API_SECRET) { next(); return; } // no secret configured = dev mode, skip auth
-  const token = req.headers.authorization?.replace("Bearer ", "");
+  const authHeader = req.headers.authorization;
+  // Also accept ?token= query param for SSE (EventSource can't set headers)
+  const queryToken = req.query.token as string | undefined;
+  if (queryToken === API_SECRET) { next(); return; }
+  if (!authHeader) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const [scheme, ...rest] = authHeader.trim().split(/\s+/);
+  if (!scheme || scheme.toLowerCase() !== "bearer") { res.status(401).json({ error: "Unauthorized" }); return; }
+  const token = rest.join(" ");
   if (token === API_SECRET) { next(); return; }
   res.status(401).json({ error: "Unauthorized" });
 }
 
-app.use(express.json());
+// Capture raw body for webhook signature verification
+let rawBodyBuffer: Buffer | null = null;
+app.use(express.json({
+  verify: (_req, _res, buf) => { rawBodyBuffer = buf; },
+}));
 
 const PORT = process.env.PORT || 3000;
 const WHATSAPP_TOKEN = process.env.META_WHATSAPP_TOKEN!;
@@ -72,8 +83,9 @@ function verifyWebhookSignature(req: express.Request): boolean {
   if (!META_APP_SECRET) return true; // skip in dev if not configured
   const sig = req.headers["x-hub-signature-256"] as string;
   if (!sig) return false;
+  const body = rawBodyBuffer || Buffer.from(JSON.stringify(req.body));
   const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
-    .update(JSON.stringify(req.body)).digest("hex");
+    .update(body).digest("hex");
   try {
     return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
   } catch {
@@ -124,7 +136,7 @@ app.get("/api/eleven-session", requireAuth, async (_req, res) => {
 
     res.json({ signedUrl: signData.signed_url, inboxContext });
   } catch (err) {
-    console.error("[bridge] eleven-session error");
+    console.error("[bridge] eleven-session error:", err instanceof Error ? err.message : err);
     res.status(500).json({ error: "Failed to create session" });
   }
 });

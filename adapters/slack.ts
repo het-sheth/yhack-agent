@@ -7,8 +7,17 @@ import type { InboundMessage } from "../shared/types.js";
 
 const jc = JSONCodec<InboundMessage>();
 
-// Cache Slack user ID → display name
+// Cache Slack user ID → display name (bounded to 500 entries)
+const USER_CACHE_MAX = 500;
 const userNameCache = new Map<string, string>();
+
+function cacheUserName(id: string, name: string) {
+  if (userNameCache.size >= USER_CACHE_MAX) {
+    const oldest = userNameCache.keys().next().value;
+    if (oldest) userNameCache.delete(oldest);
+  }
+  userNameCache.set(id, name);
+}
 
 function env(key: string): string {
   const v = process.env[key];
@@ -45,10 +54,10 @@ async function main() {
           try {
             const info = await client.users.info({ user: userId });
             const name = info.user?.real_name || info.user?.profile?.display_name || info.user?.name || userId;
-            userNameCache.set(userId, name);
+            cacheUserName(userId, name);
             user = name;
           } catch {
-            userNameCache.set(userId, userId);
+            cacheUserName(userId, userId);
           }
         }
       }
@@ -62,6 +71,7 @@ async function main() {
         id: randomUUID(),
         channel: "slack",
         from: user,
+        replyTo: channel !== "unknown" ? channel : userId, // Slack channel ID for thread replies, falls back to user ID for DMs
         body: text,
         threadId: threadTs ?? ts,
         threadDepth: threadTs ? 1 : 0,

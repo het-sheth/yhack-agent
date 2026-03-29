@@ -129,7 +129,7 @@ app.get("/api/gemini-key", requireAuth, (_req, res) => {
 app.get("/api/eleven-session", requireAuth, async (_req, res) => {
   try {
     const col = await rankedCol();
-    const messages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const messages = await col.find({ repliedAt: { $exists: false } }).sort({ rankedAt: -1 }).limit(15).toArray();
     const inboxContext = buildInboxContext(messages);
 
     // Get signed URL from ElevenLabs
@@ -600,7 +600,7 @@ app.post("/api/voice-text", requireAuth, apiLimiter, express.json(), async (req,
     if (!text) { res.json({ reply: "Didn't catch that.", audioBase64: null }); return; }
 
     const col = await rankedCol();
-    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const recentMessages = await col.find({ repliedAt: { $exists: false } }).sort({ rankedAt: -1 }).limit(15).toArray();
     const inboxContext = buildInboxContext(recentMessages);
 
     const webHistory = conversations.get("web") ?? [];
@@ -690,7 +690,7 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
 
     // Converse using the same engine (reuse converse logic inline)
     const col = await rankedCol();
-    const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray();
+    const recentMessages = await col.find({ repliedAt: { $exists: false } }).sort({ rankedAt: -1 }).limit(15).toArray();
     const inboxContext = buildInboxContext(recentMessages);
 
     const webHistory = conversations.get("web") ?? [];

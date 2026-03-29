@@ -151,6 +151,7 @@ export default function Home() {
   const [textInput, setTextInput] = useState("");
   const [orbState, setOrbState] = useState<OrbState>("idle");
   const [stats, setStats] = useState({ urgent: 0, action: 0, fyi: 0, total: 0 });
+  const [newMsgDuringVoice, setNewMsgDuringVoice] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<{ text: string; isUser: boolean }[]>([]);
 
@@ -185,6 +186,8 @@ export default function Home() {
         fyi: s.fyi + (msg.category === "fyi" || msg.category === "low-priority" ? 1 : 0),
         total: s.total + 1,
       }));
+      // Notify if voice is active — agent has stale context
+      if (activeRef.current) setNewMsgDuringVoice(true);
     });
     return () => sse.close();
   }, []);
@@ -318,6 +321,7 @@ export default function Home() {
     if (audioCtxRef.current.state === "suspended") await audioCtxRef.current.resume();
     activeRef.current = true;
     setOrbState("thinking");
+    setNewMsgDuringVoice(false);
     try {
       const session = await fetch("/api/eleven-session").then((r) => r.json());
       if (!session.signedUrl) throw new Error("No signed URL");
@@ -402,6 +406,12 @@ export default function Home() {
             {/* Orb + Input */}
             <div className="pb-24 pt-2 flex flex-col items-center gap-5">
               <SiriOrb state={orbState} onClick={orbClick} />
+              {newMsgDuringVoice && (
+                <p className="text-[12px] font-medium px-3 py-1 rounded-full animate-pulse"
+                  style={{ background: "rgba(0,122,255,0.1)", color: "#007AFF" }}>
+                  New message received — tap orb to refresh
+                </p>
+              )}
               <div className="w-full max-w-md px-6">
                 <div className="flex gap-2">
                   <input

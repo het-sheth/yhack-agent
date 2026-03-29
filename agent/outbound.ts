@@ -83,8 +83,8 @@ async function main() {
         }
 
         // Determine the Slack channel/conversation to post to
-        // replyTo should be a Slack channel ID (C...) or DM ID (D...) — prefer it
-        // Fall back: if replyTo looks like a display name (not C/D/U prefix), try to find the channel
+        // replyTo should be a Slack channel (C...), private channel (G...), DM (D...), or user (U...) ID
+        // Fall back: if replyTo looks like a display name (not C/D/G/U prefix), try to find the channel
         let slackChannel = rankedMsg.inbound.replyTo;
         if (!slackChannel || !/^[CDGU][A-Z0-9]+$/.test(slackChannel)) {
           // replyTo is missing or is a display name — try threadId's channel or skip

@@ -747,7 +747,7 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
 
 // ── Start ─────────────────────────────────────────────────────────────────
 async function main() {
-  const db = await getDb();
+  await getDb();
   nc = await connect({ servers: NATS_URL });
   console.log("[bridge] NATS connected");
 

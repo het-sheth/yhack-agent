@@ -41,9 +41,8 @@ const API_SECRET = process.env.API_SECRET;
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!API_SECRET) { next(); return; } // no secret configured = dev mode, skip auth
   const authHeader = req.headers.authorization;
-  // Also accept ?token= query param for SSE (EventSource can't set headers)
-  const queryToken = req.query.token as string | undefined;
-  if (queryToken === API_SECRET) { next(); return; }
+  // Accept ?token= only for SSE endpoint (EventSource can't set headers)
+  if (req.path === "/api/events" && req.query.token === API_SECRET) { next(); return; }
   if (!authHeader) { res.status(401).json({ error: "Unauthorized" }); return; }
   const [scheme, ...rest] = authHeader.trim().split(/\s+/);
   if (!scheme || scheme.toLowerCase() !== "bearer") { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -52,10 +51,9 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   res.status(401).json({ error: "Unauthorized" });
 }
 
-// Capture raw body for webhook signature verification
-let rawBodyBuffer: Buffer | null = null;
+// Capture raw body per-request for webhook signature verification
 app.use(express.json({
-  verify: (_req, _res, buf) => { rawBodyBuffer = buf; },
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -91,7 +89,7 @@ function verifyWebhookSignature(req: express.Request): boolean {
   if (!META_APP_SECRET) return true; // skip in dev if not configured
   const sig = req.headers["x-hub-signature-256"] as string;
   if (!sig) return false;
-  const body = rawBodyBuffer || Buffer.from(JSON.stringify(req.body));
+  const body = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
   const expected = "sha256=" + crypto.createHmac("sha256", META_APP_SECRET)
     .update(body).digest("hex");
   try {

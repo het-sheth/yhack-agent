@@ -12,6 +12,15 @@ const approvedCodec = JSONCodec<ApprovedMessage>();
 const sentCodec = JSONCodec<SentConfirmation>();
 
 let emailTransport: Transporter | null = null;
+let slackClient: WebClient | null = null;
+
+function getSlackClient(): WebClient | null {
+  if (slackClient) return slackClient;
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token) return null;
+  slackClient = new WebClient(token);
+  return slackClient;
+}
 
 function getEmailTransport(): Transporter {
   if (emailTransport) return emailTransport;
@@ -51,7 +60,7 @@ async function main() {
       }
 
       const channel = rankedMsg.inbound.channel;
-      const recipient = rankedMsg.inbound.from;
+      const recipient = rankedMsg.inbound.replyTo || rankedMsg.inbound.from;
 
       // SAFETY: always send to ourselves in demo mode
       const DEMO_MODE = process.env.DEMO_MODE !== "false";
@@ -67,16 +76,15 @@ async function main() {
         });
         console.log(`[outbound] Sent email to ${safeTo}${DEMO_MODE ? ` (demo — original: ${recipient})` : ""}`);
       } else if (channel === "slack") {
-        const slackToken = process.env.SLACK_BOT_TOKEN;
-        if (!slackToken) {
+        const slack = getSlackClient();
+        if (!slack) {
           console.warn("[outbound] No SLACK_BOT_TOKEN — cannot send Slack reply");
           continue;
         }
-        const slack = new WebClient(slackToken);
         const threadId = rankedMsg.inbound.threadId;
-        // In demo mode, send to the same thread/channel; in prod, DM the user
+        // Reply to the Slack user/channel, optionally in the original thread
         await slack.chat.postMessage({
-          channel: recipient, // Slack user ID or channel ID
+          channel: recipient, // Slack user ID from replyTo field
           text: approved.finalReply,
           ...(threadId ? { thread_ts: threadId } : {}),
         });

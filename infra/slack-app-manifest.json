@@ -1,0 +1,39 @@
+{
+  "display_information": {
+    "name": "Inbox Agent",
+    "description": "AI inbox assistant that categorizes and triages messages",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Inbox Agent",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels",
+        "message.groups"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

@@ -7,6 +7,9 @@ import type { InboundMessage } from "../shared/types.js";
 
 const jc = JSONCodec<InboundMessage>();
 
+// Cache Slack user ID → display name
+const userNameCache = new Map<string, string>();
+
 function env(key: string): string {
   const v = process.env[key];
   if (!v) throw new Error(`Missing env var: ${key}`);
@@ -25,13 +28,30 @@ async function main() {
   });
 
   // Listen to all messages in channels the bot is in
-  app.message(async ({ message }) => {
+  app.message(async ({ message, client }) => {
     try {
       // Skip bot messages and subtypes (edits, deletes, etc.)
       if (message.subtype) return;
 
-      const user = "user" in message ? (message.user as string) : "unknown";
+      const userId = "user" in message ? (message.user as string) : "unknown";
       const text = "text" in message ? (message.text as string) : "";
+
+      // Resolve user ID to display name
+      let user = userId;
+      if (userId !== "unknown") {
+        if (userNameCache.has(userId)) {
+          user = userNameCache.get(userId)!;
+        } else {
+          try {
+            const info = await client.users.info({ user: userId });
+            const name = info.user?.real_name || info.user?.profile?.display_name || info.user?.name || userId;
+            userNameCache.set(userId, name);
+            user = name;
+          } catch {
+            userNameCache.set(userId, userId);
+          }
+        }
+      }
       const threadTs =
         "thread_ts" in message ? (message.thread_ts as string) : undefined;
       const ts = message.ts;

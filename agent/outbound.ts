@@ -2,6 +2,7 @@ import "dotenv/config";
 import { randomUUID } from "crypto";
 import { connect, JSONCodec } from "nats";
 import { createTransport, type Transporter } from "nodemailer";
+import { WebClient } from "@slack/web-api";
 import { SUBJECTS, NATS_URL } from "../shared/nats.js";
 import type { RankedMessage, ApprovedMessage, SentConfirmation } from "../shared/types.js";
 import { sign } from "./signer.js";
@@ -66,8 +67,20 @@ async function main() {
         });
         console.log(`[outbound] Sent email to ${safeTo}${DEMO_MODE ? ` (demo — original: ${recipient})` : ""}`);
       } else if (channel === "slack") {
-        console.log(`[outbound] Slack reply not yet implemented — would reply to ${recipient}`);
-        continue;
+        const slackToken = process.env.SLACK_BOT_TOKEN;
+        if (!slackToken) {
+          console.warn("[outbound] No SLACK_BOT_TOKEN — cannot send Slack reply");
+          continue;
+        }
+        const slack = new WebClient(slackToken);
+        const threadId = rankedMsg.inbound.threadId;
+        // In demo mode, send to the same thread/channel; in prod, DM the user
+        await slack.chat.postMessage({
+          channel: recipient, // Slack user ID or channel ID
+          text: approved.finalReply,
+          ...(threadId ? { thread_ts: threadId } : {}),
+        });
+        console.log(`[outbound] Sent Slack reply to ${recipient}${threadId ? ` (thread: ${threadId})` : ""}`);
       } else {
         console.log(`[outbound] Channel "${channel}" not implemented — skipping`);
         continue;

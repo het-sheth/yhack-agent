@@ -581,7 +581,7 @@ app.post("/api/voice-text", requireAuth, apiLimiter, express.json(), async (req,
     const col = await rankedCol();
     const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
     const inboxContext = recentMessages.map((m, i) =>
-      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
+      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
     ).join("\n");
 
     const webHistory = conversations.get("web") ?? [];
@@ -673,7 +673,7 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
     const col = await rankedCol();
     const recentMessages = await col.find({}).sort({ rankedAt: -1 }).limit(15).toArray() as RankedMessage[];
     const inboxContext = recentMessages.map((m, i) =>
-      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
+      `[${i + 1}] ${m.category.toUpperCase()} (${m.score}/10) | Channel: ${m.inbound.channel} | From: ${m.inbound.from} | Subject: ${m.inbound.subject ?? "none"} | Gist: ${m.gist}`
     ).join("\n");
 
     const webHistory = conversations.get("web") ?? [];

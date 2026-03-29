@@ -86,7 +86,7 @@ async function main() {
         // replyTo should be a Slack channel ID (C...) or DM ID (D...) — prefer it
         // Fall back: if replyTo looks like a display name (not C/D/U prefix), try to find the channel
         let slackChannel = rankedMsg.inbound.replyTo;
-        if (!slackChannel || !/^[CDU][A-Z0-9]+$/.test(slackChannel)) {
+        if (!slackChannel || !/^[CDGU][A-Z0-9]+$/.test(slackChannel)) {
           // replyTo is missing or is a display name — try threadId's channel or skip
           console.warn(`[outbound] Slack replyTo is invalid: "${slackChannel}" for message ${rankedMsg.id}`);
           // Last resort: try opening a DM with the from field if it looks like a user ID
@@ -114,6 +114,9 @@ async function main() {
               if (dm.channel?.id) {
                 await slack.chat.postMessage({ channel: dm.channel.id, text: approved.finalReply });
                 console.log(`[outbound] Sent Slack DM to ${slackChannel} via ${dm.channel.id}`);
+              } else {
+                console.error(`[outbound] Slack DM fallback returned no channel id for ${slackChannel} — skipping`);
+                continue;
               }
             } catch (dmErr) {
               console.error(`[outbound] Slack DM fallback failed:`, dmErr);

@@ -52,7 +52,6 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
 }
 
 // Capture raw body per-request for webhook signature verification
-/// <reference path="../shared/express.d.ts" />
 app.use(express.json({
   verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
@@ -752,12 +751,10 @@ async function main() {
   nc = await connect({ servers: NATS_URL });
   console.log("[bridge] NATS connected");
 
-  // One-time migration: patch Slack messages missing replyTo
-  const patched = await db.collection("ranked").updateMany(
-    { "inbound.channel": "slack", "inbound.replyTo": { $exists: false } },
-    [{ $set: { "inbound.replyTo": { $ifNull: ["$inbound.replyTo", "unknown"] } } }]
-  );
-  if (patched.modifiedCount > 0) console.log(`[bridge] Patched ${patched.modifiedCount} Slack messages missing replyTo`);
+  // Log Slack messages with missing replyTo — outbound will handle gracefully
+  const col = await rankedCol();
+  const missingReplyTo = await col.countDocuments({ "inbound.channel": "slack", "inbound.replyTo": { $exists: false } });
+  if (missingReplyTo > 0) console.warn(`[bridge] ${missingReplyTo} Slack message(s) have no replyTo — outbound will skip or DM-fallback`);
 
   // Subscribe to NATS for SSE broadcasting
   const allSub = nc.subscribe("messages.>");

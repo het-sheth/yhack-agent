@@ -20,6 +20,8 @@ export interface RankedMessage {
   draftReply: string;
   signature: string;
   rankedAt: string;
+  repliedAt?: string;
+  repliedWith?: string;
 }
 
 export interface ApprovedMessage {

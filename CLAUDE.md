@@ -8,7 +8,7 @@ WhatsApp-first enterprise AI agent. Silently ingests email + Slack, categorizes/
 
 ## Architecture
 
-- **Raspberry Pi** runs: OpenFang, NATS server, SQLite, email adapter, Slack adapter
+- **Raspberry Pi** runs: OpenFang, NATS server, MongoDB, email adapter, Slack adapter
 - **Railway** runs: WhatsApp bridge only (needs public URL for Meta webhook)
 - **NATS** connects everything via pub/sub with wildcard subscriptions
 
@@ -103,6 +103,11 @@ demo/      ← Seed data, pitch notes
   SLACK_BOT_TOKEN=
   SLACK_APP_TOKEN=
   NATS_URL=
+  ED25519_PRIVATE_KEY=
+  ELEVENLABS_API_KEY=
+  ELEVENLABS_VOICE_ID=
+  MONGODB_URI=
+  RECIPIENT_PHONE=
   ```
 - **Ed25519 signing:** Use Node.js `crypto.sign` with Ed25519. Key pair generated once, stored in `.env`.
 - **Error handling:** Log and continue. Never crash the process on a single message failure.
@@ -110,8 +115,8 @@ demo/      ← Seed data, pitch notes
 
 ## What NOT To Do
 
-- Do not build a dashboard or web UI. WhatsApp IS the UI.
-- Do not use MongoDB — we use SQLite on the Pi for simplicity.
+- WhatsApp is the primary UI. The web dashboard (localhost:3000) is a secondary monitoring tool for demos.
+- Use MongoDB for persistence (local instance on localhost:27017/yhack-agent).
 - Do not install heavy dependencies. The Pi has limited resources.
 - Do not hardcode NATS subjects — import from `shared/nats.ts`.
 - Do not send WhatsApp messages for FYI or low-priority items. Only urgent and action-required.

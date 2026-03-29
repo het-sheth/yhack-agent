@@ -748,9 +748,16 @@ app.post("/api/voice", requireAuth, apiLimiter, upload.single("audio"), async (r
 
 // ── Start ─────────────────────────────────────────────────────────────────
 async function main() {
-  await getDb();
+  const db = await getDb();
   nc = await connect({ servers: NATS_URL });
   console.log("[bridge] NATS connected");
+
+  // One-time migration: patch Slack messages missing replyTo
+  const patched = await db.collection("ranked").updateMany(
+    { "inbound.channel": "slack", "inbound.replyTo": { $exists: false } },
+    [{ $set: { "inbound.replyTo": { $ifNull: ["$inbound.replyTo", "unknown"] } } }]
+  );
+  if (patched.modifiedCount > 0) console.log(`[bridge] Patched ${patched.modifiedCount} Slack messages missing replyTo`);
 
   // Subscribe to NATS for SSE broadcasting
   const allSub = nc.subscribe("messages.>");

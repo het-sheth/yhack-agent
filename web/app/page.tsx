@@ -392,10 +392,10 @@ export default function Home() {
               {chat.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full gap-2">
                   <p className="text-[28px] font-semibold tracking-[0.36px]">
-                    Inbox Agent
+                    Yapper
                   </p>
                   <p className="text-[15px] tracking-[-0.24px]" style={{ color: "rgba(60,60,67,0.6)" }}>
-                    Voice AI for every communication channel
+                    It yapps so you don't have to.
                   </p>
                 </div>
               ) : (

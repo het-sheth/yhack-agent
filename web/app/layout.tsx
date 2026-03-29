@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Inbox Agent",
-  description: "AI-powered inbox triage for insurance brokers",
+  title: "Yapper",
+  description: "It yapps so you don't have to.",
 };
 
 export default function RootLayout({

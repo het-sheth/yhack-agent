@@ -175,21 +175,26 @@ export default function Home() {
     }).catch(() => {});
   }, []);
 
+  function updateStats(msgs: RankedMessage[]) {
+    const s = { urgent: 0, action: 0, fyi: 0, total: msgs.length };
+    msgs.forEach((m) => { if (m.category === "urgent") s.urgent++; else if (m.category === "action-required") s.action++; else s.fyi++; });
+    setStats(s);
+  }
+
+  // Poll for new messages (SSE doesn't work through Vercel serverless)
   useEffect(() => {
-    const sse = new EventSource("/api/events");
-    sse.addEventListener("ranked", (e) => {
-      const msg: RankedMessage = JSON.parse(e.data);
-      setMessages((prev) => [msg, ...prev]);
-      setStats((s) => ({
-        urgent: s.urgent + (msg.category === "urgent" ? 1 : 0),
-        action: s.action + (msg.category === "action-required" ? 1 : 0),
-        fyi: s.fyi + (msg.category === "fyi" || msg.category === "low-priority" ? 1 : 0),
-        total: s.total + 1,
-      }));
-      // Notify if voice is active — agent has stale context
-      if (activeRef.current) setNewMsgDuringVoice(true);
-    });
-    return () => sse.close();
+    const poll = setInterval(() => {
+      fetch("/api/messages?limit=50").then((r) => r.json()).then((msgs: RankedMessage[]) => {
+        setMessages((prev) => {
+          if (msgs.length !== prev.length) {
+            updateStats(msgs);
+            if (activeRef.current && msgs.length > prev.length) setNewMsgDuringVoice(true);
+          }
+          return msgs;
+        });
+      }).catch(() => {});
+    }, 5000);
+    return () => clearInterval(poll);
   }, []);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);

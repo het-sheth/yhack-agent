@@ -251,7 +251,7 @@ export default function Home() {
   }
 
   // Regex for detecting agent send confirmations — single source of truth
-  const SEND_CONFIRM_RE = /sending it now|i.?ve sent|sent the (response|reply|message)/i;
+  const SEND_CONFIRM_RE = /sending it now|i.?ve sent|sent .{0,5}(response|reply|message)|^sent\b/i;
 
   // Extract the draft from recent conversation — check the send message first, then walk back
   function extractDraftFromChat(sendText?: string): string | null {

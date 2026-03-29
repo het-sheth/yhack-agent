@@ -30,9 +30,10 @@ app.use(cors({
 // ── Rate limiting ────────────────────────────────────────────────────────
 const apiLimiter = rateLimit({
   windowMs: 60_000,
-  max: 60,
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
 });
 
 // ── Auth middleware for /api/* routes ─────────────────────────────────────

@@ -14,7 +14,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Yapper",
-  description: "It yapps so you don't have to.",
+  description: "One voice. Every channel.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({

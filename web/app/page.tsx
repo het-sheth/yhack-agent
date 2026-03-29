@@ -395,7 +395,7 @@ export default function Home() {
                     Yapper
                   </p>
                   <p className="text-[15px] tracking-[-0.24px]" style={{ color: "rgba(60,60,67,0.6)" }}>
-                    It yapps so you don't have to.
+                    One voice. Every channel.
                   </p>
                 </div>
               ) : (

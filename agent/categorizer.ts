@@ -63,13 +63,19 @@ async function main() {
       const signature = sign(JSON.stringify(unsigned));
       const ranked: RankedMessage = { ...unsigned, signature };
 
-      // Publish to NATS
+      // Persist to MongoDB first — only publish to NATS on success
+      // This prevents duplicate NATS messages when the unique index rejects a dupe
+      try {
+        await col.insertOne(ranked as any);
+      } catch (err: any) {
+        if (err.code === 11000) {
+          console.warn(`[categorizer] Duplicate inbound.id ${inbound.id} — skipping`);
+        } else {
+          console.error("[categorizer] MongoDB write failed:", err.message);
+        }
+        continue; // skip NATS publish if DB insert failed
+      }
       nc.publish(SUBJECTS.RANKED, rankedCodec.encode(ranked));
-
-      // Persist to MongoDB
-      await col.insertOne(ranked as any).catch((err: any) =>
-        console.error("[categorizer] MongoDB write failed:", err.message)
-      );
 
       const emoji = category === "urgent" ? "🔴" : category === "action-required" ? "🟡" : category === "fyi" ? "🟢" : "⚪";
       console.log(`[categorizer] ${emoji} ${category} (${score}/10): ${result.gist}`);

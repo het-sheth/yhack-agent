@@ -16,8 +16,9 @@ function getKeyPair(): { privateKey: KeyObject; publicKey: KeyObject } {
     publicKey = pair.publicKey;
     console.warn(
       "[signer] No ED25519_PRIVATE_KEY in env — generated ephemeral key pair.",
-      "Add this to .env for persistence:\n",
-      privateKey.export({ type: "pkcs8", format: "pem" })
+      "Signatures will not persist across restarts. Set ED25519_PRIVATE_KEY in .env.",
+      "\nPublic key:\n",
+      publicKey.export({ type: "spki", format: "pem" })
     );
   }
 

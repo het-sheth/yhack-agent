@@ -96,23 +96,75 @@ function addCard(m) {
   const s = catStyle[m.category]||catStyle.fyi;
   const sig = m.signature ? m.signature.slice(0,16)+'...' : '';
   const sc = m.score>=8?'text-red-400':m.score>=5?'text-yellow-400':'text-green-400';
-  document.getElementById('feed').insertAdjacentHTML('afterbegin',
-    `<div class="card-enter border ${s.bd} ${s.bg} rounded-lg p-4">
-      <div class="flex items-start justify-between gap-3">
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="px-1.5 py-0.5 ${s.badge} text-white text-[10px] font-bold rounded">${s.label}</span>
-            <span class="text-xs text-gray-500">${new Date(m.rankedAt||'').toLocaleTimeString()}</span>
-            <span class="text-xs text-gray-600">${m.inbound?.channel||''}</span>
-          </div>
-          <p class="text-sm font-medium text-gray-200 truncate">${m.inbound?.from||''}</p>
-          <p class="text-xs text-gray-400 truncate">${m.inbound?.subject||''}</p>
-          <p class="text-sm text-gray-300 mt-1">${m.gist||''}</p>
-        </div>
-        <div class="text-right shrink-0"><div class="text-2xl font-bold ${sc}">${m.score}</div><div class="text-[10px] text-gray-600">/10</div></div>
-      </div>
-      ${sig?`<div class="sig text-gray-700 mt-1">sig: ${sig}</div>`:''}
-    </div>`);
+  const feed = document.getElementById('feed');
+
+  const card = document.createElement('div');
+  card.className = `card-enter border ${s.bd} ${s.bg} rounded-lg p-4`;
+
+  const flex = document.createElement('div');
+  flex.className = 'flex items-start justify-between gap-3';
+  card.appendChild(flex);
+
+  const left = document.createElement('div');
+  left.className = 'flex-1 min-w-0';
+  flex.appendChild(left);
+
+  const header = document.createElement('div');
+  header.className = 'flex items-center gap-2 mb-1';
+  left.appendChild(header);
+
+  const badge = document.createElement('span');
+  badge.className = `px-1.5 py-0.5 ${s.badge} text-white text-[10px] font-bold rounded`;
+  badge.textContent = s.label;
+  header.appendChild(badge);
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'text-xs text-gray-500';
+  timeSpan.textContent = new Date(m.rankedAt||'').toLocaleTimeString();
+  header.appendChild(timeSpan);
+
+  const channelSpan = document.createElement('span');
+  channelSpan.className = 'text-xs text-gray-600';
+  channelSpan.textContent = m.inbound?.channel||'';
+  header.appendChild(channelSpan);
+
+  const fromP = document.createElement('p');
+  fromP.className = 'text-sm font-medium text-gray-200 truncate';
+  fromP.textContent = m.inbound?.from||'';
+  left.appendChild(fromP);
+
+  const subjectP = document.createElement('p');
+  subjectP.className = 'text-xs text-gray-400 truncate';
+  subjectP.textContent = m.inbound?.subject||'';
+  left.appendChild(subjectP);
+
+  const gistP = document.createElement('p');
+  gistP.className = 'text-sm text-gray-300 mt-1';
+  gistP.textContent = m.gist||'';
+  left.appendChild(gistP);
+
+  const right = document.createElement('div');
+  right.className = 'text-right shrink-0';
+  flex.appendChild(right);
+
+  const scoreVal = document.createElement('div');
+  scoreVal.className = `text-2xl font-bold ${sc}`;
+  scoreVal.textContent = String(m.score);
+  right.appendChild(scoreVal);
+
+  const scoreLabel = document.createElement('div');
+  scoreLabel.className = 'text-[10px] text-gray-600';
+  scoreLabel.textContent = '/10';
+  right.appendChild(scoreLabel);
+
+  if (sig) {
+    const sigDiv = document.createElement('div');
+    sigDiv.className = 'sig text-gray-700 mt-1';
+    sigDiv.textContent = `sig: ${sig}`;
+    card.appendChild(sigDiv);
+  }
+
+  feed.insertBefore(card, feed.firstChild);
   document.getElementById('empty').classList.add('hidden');
   st.t++; if(m.category==='urgent')st.u++; else if(m.category==='action-required')st.a++; else st.f++;
   document.getElementById('s-u').textContent=st.u;
@@ -152,7 +204,16 @@ function addBubble(text, isUser) {
   const hist = document.getElementById('vhist');
   const align = isUser ? 'justify-end' : 'justify-start';
   const bg = isUser ? 'bg-blue-600' : 'bg-gray-800';
-  hist.insertAdjacentHTML('beforeend', `<div class="flex ${align}"><div class="${bg} rounded-lg px-3 py-2 max-w-[80%]"><p class="text-sm">${text}</p></div></div>`);
+  const wrapper = document.createElement('div');
+  wrapper.className = `flex ${align}`;
+  const bubble = document.createElement('div');
+  bubble.className = `${bg} rounded-lg px-3 py-2 max-w-[80%]`;
+  const p = document.createElement('p');
+  p.className = 'text-sm';
+  p.textContent = text;
+  bubble.appendChild(p);
+  wrapper.appendChild(bubble);
+  hist.appendChild(wrapper);
   hist.scrollTop = hist.scrollHeight;
 }
 
@@ -253,7 +314,7 @@ async function orbClickEleven() {
         const text = msg.agent_response_event?.agent_response;
         if (text) {
           addBubble(text, false);
-          if (/sending it now/i.test(text)) triggerSendFromVoice(text);
+          if (/sending it now/i.test(text) && !voiceSendInFlight) triggerSendFromVoice(text);
         }
       }
 
@@ -669,22 +730,40 @@ function finishGroq() {
 }
 
 // ── Voice send trigger: detect "Sending it now" from agent ──
+let voiceSendInFlight = false;
+let lastApprovedMessageId = null;
+
 async function triggerSendFromVoice(agentText) {
+  if (voiceSendInFlight) return;
+  voiceSendInFlight = true;
+
   try {
-    // Find the most relevant message by matching recipient name from agent's response
     const res = await fetch('/api/messages?limit=15');
+    if (!res.ok) { console.error('Failed to fetch messages:', res.status); return; }
     const messages = await res.json();
     if (!messages.length) return;
 
-    // Try to match a name from the agent's text to a message sender
-    let target = messages[0]; // default to most urgent/recent
+    // Only send if we can confidently match a recipient — no fallback to messages[0]
+    let target = null;
+    const loweredText = agentText.toLowerCase();
     for (const m of messages) {
       const from = (m.inbound?.from || '').toLowerCase();
       const name = from.split('@')[0].replace(/[._]/g, ' ');
-      if (agentText.toLowerCase().includes(name) || agentText.toLowerCase().includes(from)) {
+      if ((name && loweredText.includes(name)) || (from && loweredText.includes(from))) {
         target = m;
         break;
       }
+    }
+
+    if (!target || !target.draftReply) {
+      console.warn('Voice send skipped: could not confidently match a message from agent text.');
+      return;
+    }
+
+    // Prevent duplicate sends for the same message
+    if (target.id === lastApprovedMessageId) {
+      console.warn('Voice send skipped: already approved this message.');
+      return;
     }
 
     const approveRes = await fetch('/api/approve', {
@@ -692,13 +771,31 @@ async function triggerSendFromVoice(agentText) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messageId: target.id, draft: target.draftReply }),
     });
-    const result = await approveRes.json();
-    if (result.ok) {
+
+    if (!approveRes.ok) {
+      const errText = await approveRes.text().catch(() => '');
+      console.error('Approve request failed:', approveRes.status, errText);
+      addBubble('Error: failed to send reply. Please try again.', false);
+      return;
+    }
+
+    let result;
+    try { result = await approveRes.json(); } catch {
+      addBubble('Error: invalid response from server.', false);
+      return;
+    }
+
+    if (result && result.ok) {
+      lastApprovedMessageId = target.id;
       console.log('Voice send triggered:', result.to);
-      addBubble(`✅ Reply sent to ${result.to} via ${result.channel}`, false);
+      addBubble(`Reply sent to ${result.to} via ${result.channel}`, false);
+    } else {
+      addBubble('Error: failed to send reply.', false);
     }
   } catch (e) {
     console.error('Voice send error:', e);
+  } finally {
+    voiceSendInFlight = false;
   }
 }
 

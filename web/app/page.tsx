@@ -152,6 +152,7 @@ export default function Home() {
   const [orbState, setOrbState] = useState<OrbState>("idle");
   const [stats, setStats] = useState({ urgent: 0, action: 0, fyi: 0, total: 0 });
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatRef = useRef<{ text: string; isUser: boolean }[]>([]);
 
   // ElevenLabs refs
   const activeRef = useRef(false);
@@ -188,7 +189,7 @@ export default function Home() {
     return () => sse.close();
   }, []);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
+  useEffect(() => { chatRef.current = chat; chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
 
   // ── Text chat ──
   async function sendTextMsg() {
@@ -236,6 +237,30 @@ export default function Home() {
     source.onended = () => { sourcesRef.current = sourcesRef.current.filter((s) => s !== source); };
   }
 
+  // Extract the draft from the conversation — look backwards for the last agent message
+  // that contains a quoted draft (before "Sending it now")
+  function extractDraftFromChat(): string | null {
+    // Walk backwards through chat to find the agent's draft message
+    for (let i = chatRef.current.length - 1; i >= 0; i--) {
+      const msg = chatRef.current[i];
+      if (msg.isUser) continue;
+      // Skip the "Sending it now" message itself
+      if (/sending it now/i.test(msg.text)) continue;
+      // The previous agent message is likely the draft
+      // Extract text between quotes if present, otherwise use the whole message
+      const quoted = msg.text.match(/"([^"]+)"/);
+      if (quoted) return quoted[1];
+      // If no quotes, check if it looks like a draft (contains "draft:" or "here's")
+      if (/draft|here'?s|how about|message.*say/i.test(msg.text)) {
+        // Try to extract the actual content after the intro
+        const colonSplit = msg.text.split(/:\s*"/);
+        if (colonSplit.length > 1) return colonSplit[1].replace(/".*$/, "");
+        return msg.text;
+      }
+    }
+    return null;
+  }
+
   async function triggerSend(agentText: string) {
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -250,8 +275,14 @@ export default function Home() {
         const name = from.split("@")[0].replace(/[._]/g, " ");
         if ((name && lower.includes(name)) || (from && lower.includes(from))) { target = m; break; }
       }
-      if (!target?.draftReply || target.id === lastApprovedRef.current) return;
-      const approveRes = await fetch("/api/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messageId: target.id, draft: target.draftReply }) });
+      if (!target || target.id === lastApprovedRef.current) return;
+
+      // Use the draft from the conversation, not the categorizer's draftReply
+      const conversationDraft = extractDraftFromChat();
+      const draft = conversationDraft || target.draftReply;
+      if (!draft) return;
+
+      const approveRes = await fetch("/api/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messageId: target.id, draft }) });
       if (approveRes.ok) { const result = await approveRes.json(); if (result.ok) { lastApprovedRef.current = target.id; setChat((h) => [...h, { text: `Reply sent to ${result.to}`, isUser: false }]); } }
     } finally { sendInFlightRef.current = false; }
   }

@@ -248,26 +248,27 @@ export default function Home() {
   // Regex for detecting agent send confirmations — single source of truth
   const SEND_CONFIRM_RE = /sending it now|i.?ve sent|sent the (response|reply|message)/i;
 
-  // Extract the draft from the conversation — look backwards for the last agent message
-  // that contains a quoted draft (before send confirmation)
-  function extractDraftFromChat(): string | null {
-    // Walk backwards through chat to find the agent's draft message
+  // Extract the draft from recent conversation — check the send message first, then walk back
+  function extractDraftFromChat(sendText?: string): string | null {
+    // 1. Check if the draft is quoted inside the send confirmation message itself
+    //    e.g. 'The message would be: "I am broke." Sending it now to YHack Broker.'
+    if (sendText) {
+      const quoted = sendText.match(/"([^"]+)"/);
+      if (quoted) return quoted[1];
+    }
+
+    // 2. Walk backwards through recent agent messages for the most recent quoted draft
     for (let i = chatRef.current.length - 1; i >= 0; i--) {
       const msg = chatRef.current[i];
       if (msg.isUser) continue;
-      // Skip the "Sending it now" message itself
-      if (SEND_CONFIRM_RE.test(msg.text)) continue;
-      // The previous agent message is likely the draft
-      // Extract text between quotes if present, otherwise use the whole message
+      if (SEND_CONFIRM_RE.test(msg.text) && !msg.text.includes('"')) continue;
+
+      // Look for quoted text
       const quoted = msg.text.match(/"([^"]+)"/);
       if (quoted) return quoted[1];
-      // If no quotes, check if it looks like a draft (contains "draft:" or "here's")
-      if (/draft|here'?s|how about|message.*say/i.test(msg.text)) {
-        // Try to extract the actual content after the intro
-        const colonSplit = msg.text.split(/:\s*"/);
-        if (colonSplit.length > 1) return colonSplit[1].replace(/".*$/, "");
-        return msg.text;
-      }
+
+      // Stop after checking 3 agent messages — don't pick up old unrelated ones
+      break;
     }
     return null;
   }
@@ -289,7 +290,7 @@ export default function Home() {
       if (!target || target.id === lastApprovedRef.current) return;
 
       // Use the draft from the conversation, not the categorizer's draftReply
-      const conversationDraft = extractDraftFromChat();
+      const conversationDraft = extractDraftFromChat(agentText);
       const draft = conversationDraft || target.draftReply;
       if (!draft) return;
 
